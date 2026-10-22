@@ -168,7 +168,7 @@ function supportContentType(name) {
   return 'application/octet-stream';
 }
 
-export function makeRoutes({ ctx, engine, log, prefix, diag }) {
+export function makeRoutes({ ctx, engine, log, prefix, diag, voiceInstaller }) {
 
   async function handler(req, res) {
 
@@ -183,6 +183,24 @@ export function makeRoutes({ ctx, engine, log, prefix, diag }) {
 
 
     try {
+
+      if (route === '/voice-install' && method === 'GET' && voiceInstaller) {
+        sendJson(res, 200, await voiceInstaller.status());
+        return;
+      }
+      if (route.startsWith('/voice-install/') && method === 'POST' && voiceInstaller) {
+        let originAllowed = !req.headers.origin;
+        try { if (req.headers.origin) originAllowed = new URL(req.headers.origin).host === req.headers.host; } catch { /* reject invalid Origin */ }
+        if (!originAllowed || !(req.headers['content-type'] || '').toLowerCase().startsWith('application/json')) {
+          sendJson(res, 403, { ok: false, error: '请从陪玩插件面板操作语音安装' });
+          return;
+        }
+        if (route === '/voice-install/start') sendJson(res, 202, await voiceInstaller.start(await readBody(req)));
+        else if (route === '/voice-install/cancel') sendJson(res, 200, await voiceInstaller.cancel());
+        else if (route === '/voice-install/open-models') sendJson(res, 200, await voiceInstaller.openModels());
+        else sendJson(res, 404, { ok: false, error: '未知安装操作' });
+        return;
+      }
 
       if (method === 'GET' && (route === '/' || route === '/state')) {
 
@@ -402,9 +420,47 @@ export function makeRoutes({ ctx, engine, log, prefix, diag }) {
 
       if (method === 'GET' && route === '/voices') {
 
-        const voices = await engine.VOICE.listVoices({ force: url.searchParams.get('force') === '1' });
+        const force = url.searchParams.get('force') === '1';
+        const voices = await engine.VOICE.listVoices({ force });
+        const settings = engine.getSettings?.() ?? engine.getState().config ?? {};
 
-        sendJson(res, 200, { ok: true, voices, service: engine.getState().services.voice });
+        // 语音服务是否在线：面板要区分“正在加载 / 服务未启动 / 未安装模型”
+        let health = { ok: false, error: '语音服务未响应' };
+        try { health = await engine.VOICE.health(1200); } catch (error) { health = { ok: false, error: errorText(error) }; }
+
+        // 一键安装环境：/voices 会列出服务内置的全部声线（即使模型没下载），
+        // 因此用磁盘上实际存在的 weights/*.pth 做交集；自定义外部服务仍用服务返回的列表。
+        let install = null;
+        try { install = voiceInstaller ? await voiceInstaller.status() : null; } catch { install = null; }
+
+        let externalService = false;
+        try {
+          const voiceUrl = new URL(String(settings.services?.voiceUrl ?? 'http://127.0.0.1:9123'));
+          const localHost = voiceUrl.hostname === '127.0.0.1' || voiceUrl.hostname === 'localhost';
+          externalService = !localHost || voiceUrl.port !== '9123';
+        } catch { externalService = true; }
+
+        const managed = Boolean(install?.runtimeReady) && !externalService;
+        const installed = new Set((install?.models?.voices ?? []).map((name) => String(name).replace(/\.pth$/i, '')));
+        const catalog = managed
+          ? voices.filter((voice) => installed.has(String(voice.id))).map((voice) => ({ ...voice, installed: true }))
+          : voices;
+
+        sendJson(res, 200, {
+          ok: true,
+          voices: catalog,
+          allVoices: voices,
+          service: engine.getState().services.voice,
+          serviceOk: Boolean(health.ok),
+          serviceError: health.ok ? null : (health.error ?? '语音服务未启动'),
+          source: managed ? 'managed' : 'service',
+          managed,
+          externalService,
+          runtimeReady: Boolean(install?.runtimeReady),
+          models: install?.models ?? null,
+          modelDir: install?.modelDir ?? null,
+          installedVoices: managed ? [...installed] : null,
+        });
 
         return;
 

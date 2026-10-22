@@ -1,7 +1,6 @@
 {
-  "name": "dsh-companion",
-  "version": "1.9.5-test1",
-  "private": true,
+  "name": "@jyddwy/dsh-companion",
+  "version": "1.9.6-test4",
   "description": "看屏幕陪玩/陪看剧/陪写代码的 DSH 插件：自动截图 → 多模态理解 → 人格化台词（带情绪）→ 本地 TTS + RVC 语音朗读。右侧栏可开停、调参数、看记录、开新对话、直接聊天。",
   "type": "module",
   "main": "index.js",
@@ -28,9 +27,11 @@
     "assets",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
-    "install.ps1",
-    "安装.cmd",
-    "卸载.cmd"
+    "INSTALL.md",
+    "docs",
+    "voice-enhancement",
+    "安装RVC语音.ps1",
+    "安装RVC语音.cmd"
   ],
   "dsh": {
     "bundle": {
@@ -50,5 +51,25 @@
       }
     }
   },
-  "icon": "icon.svg"
+  "icon": "icon.svg",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public",
+    "tag": "test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JYDDWY/dsh-companion.git"
+  },
+  "homepage": "https://github.com/JYDDWY/dsh-companion#readme",
+  "bugs": {
+    "url": "https://github.com/JYDDWY/dsh-companion/issues"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "companion",
+    "screen",
+    "tts"
+  ]
 }

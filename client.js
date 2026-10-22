@@ -8,7 +8,7 @@
 //   - 开停检测、立刻看一眼、闭嘴、改配置
 //   - 直接在面板里和卡律聊天（文字进，文字+语音出）
 window.__ModuleLoader__.load({
-  id: 'dsh-companion',
+  id: '@jyddwy/dsh-companion',
   factory(require) {
     const React = require('react');
     const h = React.createElement;
@@ -314,7 +314,90 @@ window.__ModuleLoader__.load({
 
     // ── 设置面板 ──────────────────────────────────────────────────────────
 
-    function SettingsView({ snapshot, models, voices, onSaved, notify }) {
+    function VoiceInstallPanel({ notify, onVoiceRefresh }) {
+      const [status, setStatus] = useState(null);
+      const [error, setError] = useState('');
+      const [busy, setBusy] = useState(false);
+      const previousJobPhase = useRef('');
+      useEffect(() => {
+        let alive = true, timer;
+        async function refresh() {
+          try {
+            const next = await apiGet('/voice-install');
+            if (alive) {
+              setStatus(next);
+              setError('');
+              const phase = next?.job?.phase ?? '';
+              // 增强环境安装完成 → 主动刷新声线（模型可能刚补齐）
+              if (phase === 'complete' && previousJobPhase.current !== 'complete') {
+                void onVoiceRefresh?.({ force: true, retries: 4 });
+              }
+              previousJobPhase.current = phase;
+            }
+          } catch (err) { if (alive) setError(err.message); }
+          if (alive) timer = setTimeout(refresh, 2500);
+        }
+        void refresh();
+        return () => { alive = false; clearTimeout(timer); };
+      }, []);
+      async function act(action, body) {
+        setBusy(true);
+        try {
+          const next = await apiPost(`/voice-install/${action}`, body);
+          if (action !== 'open-models') setStatus(next);
+          setError('');
+        } catch (err) { setError(err.message); }
+        finally { setBusy(false); }
+      }
+      const job = status?.job;
+      const running = Boolean(job?.running);
+      const modelsReady = Boolean(status?.models?.present);
+      const staleJobMessage = Boolean(job && !running && modelsReady && job.phase === 'complete');
+      const missing = status ? [!status.models.hubert && 'HuBERT', !status.models.rmvpe && 'RMVPE',
+        status.models.voices.length === 0 && '至少一种声线'].filter(Boolean) : [];
+      return h('div', { style: { padding: 10, marginBottom: 10, border: `1px solid ${COLORS.border}`, borderRadius: 8, overflowWrap: 'anywhere' } },
+        h('strong', null, '可选：一键安装语音增强'),
+        h('p', { className: 'dsc-row-hint', style: { margin: '6px 0' } },
+          '从国内源安装独立 Python 和 CPU 语音环境，无需访问 GitHub、手动装 Python 或使用命令行。需联网下载数百 MB，并预留约 3 GB 磁盘空间；CPU 推理速度取决于电脑性能。'),
+        h('p', { className: 'dsc-row-hint', style: { margin: '6px 0' } },
+          '不包含任何声线、HuBERT 或 RMVPE 模型；模型需自行下载。更新主插件会保留增强环境和模型。'),
+        status && !status.supported ? h('p', null, '目前支持 Windows x64。') : null,
+        status?.runtimeReady ? h('p', { style: { color: COLORS.success, margin: '6px 0' } },
+          `环境已安装（${status.installedVersion}）${missing.length ? '；待补齐模型：' + missing.join('、') : '；模型已就绪，选择已有声线后可重启语音并试听'}`) : null,
+        job && !staleJobMessage ? h('p', { role: 'status', style: { margin: '6px 0' } }, job.message,
+          running && job.phase === 'downloading' ? `（${(job.downloaded / 1048576).toFixed(1)}${job.total ? ' / ' + (job.total / 1048576).toFixed(1) : ''} MB）` : '') : null,
+        error ? h('p', { role: 'alert', style: { color: COLORS.error } }, error) : null,
+        h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+          h('button', { className: 'dsc-btn primary', disabled: busy || !status?.supported || running,
+            onClick: () => act('start', { confirmDownload: true }) }, status?.runtimeReady ? '重新安装增强环境' : '下载并安装语音增强（CPU）'),
+          running ? h('button', { className: 'dsc-btn', disabled: busy || ['activating', 'complete'].includes(job.phase), onClick: () => act('cancel') }, '取消安装') : null,
+          status?.runtimeReady ? h('button', { className: 'dsc-btn', disabled: busy, onClick: () => act('open-models') }, '打开模型目录') : null,
+          status?.runtimeReady && !missing.length ? h('button', { className: 'dsc-btn', disabled: busy,
+            onClick: async () => {
+              setBusy(true);
+              try {
+                const response = await apiPost('/services/restart', { kind: 'voice' });
+                if (!response.result?.ok) throw new Error(response.result?.error || '语音启动失败，请查看服务日志');
+                notify?.('已执行语音重启，正在刷新声线…');
+                await onVoiceRefresh?.({ force: true, retries: 5 });
+              } catch (err) { setError(err.message); }
+              finally { setBusy(false); }
+            } }, '重启语音') : null,
+        ),
+        status?.runtimeReady ? h('details', { style: { marginTop: 8 } },
+          h('summary', { style: { cursor: 'pointer' } }, '模型放在哪里？'),
+          h('p', { className: 'dsc-row-hint' }, status.modelDir),
+          h('p', { className: 'dsc-row-hint' }, 'HuBERT 权重放在 hubert_base/pytorch_model.bin；RMVPE 放在 rmvpe/rmvpe.pt；声线放在 weights/，支持 march7.pth、furina.pth、nahida.pth、shogun.pth。可选的同名 .index 放在 indices/。请遵守模型作者的使用条件。'),
+          h('a', { href: 'https://huggingface.co/lj1995/VoiceConversionWebUI/tree/main/hubert_base', target: '_blank', rel: 'noreferrer' }, 'HuBERT 原作者下载页'),
+          ' · ', h('a', { href: 'https://huggingface.co/lj1995/VoiceConversionWebUI/blob/main/rmvpe.pt', target: '_blank', rel: 'noreferrer' }, 'RMVPE 原作者下载页'),
+          h('p', { className: 'dsc-row-hint' }, '声线下载地址见插件随附的 docs/RVC-声线下载指南.md；模型下载网站的可达性取决于网络，当前安装按钮只负责运行环境。'),
+        ) : null,
+        job?.logs?.length ? h('details', { style: { marginTop: 8 } }, h('summary', { style: { cursor: 'pointer' } }, '安装日志'),
+          h('pre', { style: { whiteSpace: 'pre-wrap', maxHeight: 160, overflow: 'auto', fontSize: 11 } }, job.logs.join('\n'))) : null,
+      );
+    }
+
+    function SettingsView({ snapshot, models, voices, voiceState, onRefreshVoices, onSaved, notify }) {
       const [draft, setDraft] = useState(null);
       const [saving, setSaving] = useState(false);
       const [serviceLog, setServiceLog] = useState('');
@@ -342,6 +425,11 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         loadWorldbooks();
       }, []);
+
+      // 打开设置页就主动刷新一次声线（force=1 绕过缓存）
+      useEffect(() => {
+        void onRefreshVoices?.({ force: true, retries: 3 });
+      }, [onRefreshVoices]);
 
       useEffect(() => {
         let alive = true;
@@ -501,7 +589,49 @@ window.__ModuleLoader__.load({
         return { provider, model };
       };
 
-      const voiceOptions = (voices ?? []).map((voice) => h('option', { key: voice.id, value: voice.id }, voice.name || voice.id));
+      const voiceData = voiceState?.data ?? null;
+      const voiceLoading = voiceState?.loading !== false;
+      const voiceServiceOk = voiceData?.serviceOk ?? voiceData?.service?.ok ?? Boolean(snapshot?.services?.voice?.ok);
+      const voiceManaged = Boolean(voiceData?.managed);
+      const voiceModels = voiceData?.models ?? null;
+      const voiceList = Array.isArray(voices) ? voices : [];
+      const currentVoiceId = String(draft.voice.voiceId ?? '');
+      const currentVoiceAvailable = voiceList.some((voice) => String(voice.id) === currentVoiceId);
+      const modelsMissing = voiceManaged && voiceModels && (!voiceModels.hubert || !voiceModels.rmvpe || (voiceModels.voices ?? []).length === 0);
+      const noVoices = !voiceLoading && voiceList.length === 0;
+      const systemVoiceActive = draft.voice.backend === 'sapi'
+        || snapshot?.services?.voice?.backend?.backend === 'sapi'
+        || snapshot?.lastVoice?.backend === 'sapi';
+      const voicePlaceholder = voiceLoading
+        ? '正在加载声线…'
+        : !voiceServiceOk
+          ? '语音服务未启动'
+          : modelsMissing
+            ? '未检测到声线模型'
+            : '未检测到可用声线';
+      const voiceHint = voiceState?.error
+        ? `读取声线失败：${voiceState.error}`
+        : voiceLoading
+          ? '正在读取声线…'
+          : !voiceServiceOk
+            ? '语音服务未启动。安装/启动语音增强后点「刷新声线」即可恢复，不需要刷新整个 DSH。'
+            : modelsMissing
+              ? '未检测到声线模型：把 .pth 放到模型目录 weights/ 后点「刷新声线」。'
+              : noVoices
+                ? (voiceManaged ? '环境已安装，但没有检测到可用的声线模型。' : '语音服务返回的声线列表为空。')
+                : `可用声线 ${voiceList.length} 个${voiceManaged ? '（已按实际安装的模型过滤）' : ''}。`;
+      const voiceOptions = [];
+      if (!currentVoiceAvailable) {
+        const currentLabel = voiceLoading
+          ? '正在加载声线…'
+          : currentVoiceId
+            ? `当前声线暂不可用（${currentVoiceId}）`
+            : voicePlaceholder;
+        voiceOptions.push(h('option', { key: 'current', value: currentVoiceId }, currentLabel));
+      }
+      for (const voice of voiceList) {
+        voiceOptions.push(h('option', { key: voice.id, value: voice.id }, `${voice.name || voice.id}${voice.installed ? '' : ''}`));
+      }
 
       return h(
         'div',
@@ -582,6 +712,7 @@ window.__ModuleLoader__.load({
         h(
           Section,
           { title: '声音（TTS + RVC）', icon: ICONS.volume, defaultOpen: true },
+          h(VoiceInstallPanel, { notify, onVoiceRefresh: onRefreshVoices }),
           h(Toggle, { checked: draft.voice.enabled, onChange: (value) => set('voice.enabled', value), label: '开启语音朗读（关掉只出文字）' }),
           h(Toggle, { checked: draft.voice.emotionEnabled, onChange: (value) => set('voice.emotionEnabled', value), label: '情绪化语调（按台词情绪调整语气，避免捧读）' }),
           h(Row, { label: '语音后端', hint: '自动：优先用本地 RVC 语音服务，服务不在就用 Windows 系统语音（离线）。' },
@@ -591,14 +722,30 @@ window.__ModuleLoader__.load({
               h('option', { value: 'sapi' }, '只用 Windows 系统语音（离线、零依赖）'),
             ),
           ),
-          draft.voice.backend === 'sapi'
-            ? h('div', { className: 'dsc-row-hint', style: { margin: '2px 0 0' } }, '当前是系统语音后端：声线/音调不生效，语速会映射成系统语音速度。')
+          systemVoiceActive
+            ? h('div', { className: 'dsc-row-hint', style: { margin: '2px 0 0' } }, '当前使用 Windows 系统语音：RVC 声线/音调设置不生效（语速会映射成系统语音速度）。想用下方声线，请先安装语音增强并启动语音服务。')
             : null,
           h(Row, { label: '声线' },
-            voices && voices.length > 0
-              ? h('select', { className: 'dsc-select', value: draft.voice.voiceId, onChange: (e) => set('voice.voiceId', e.target.value) }, voiceOptions)
-              : h('input', { className: 'dsc-text', value: draft.voice.voiceId, onChange: (e) => set('voice.voiceId', e.target.value) }),
+            h('select', {
+              className: 'dsc-select',
+              value: draft.voice.voiceId,
+              disabled: voiceLoading || voiceList.length === 0,
+              onChange: (e) => set('voice.voiceId', e.target.value),
+            }, voiceOptions),
+            h('button', {
+              className: 'dsc-btn ghost',
+              disabled: voiceLoading,
+              onClick: () => void onRefreshVoices?.({ force: true, retries: 3 }),
+            }, voiceLoading ? '刷新中…' : '刷新声线'),
           ),
+          h('div', { className: 'dsc-row-hint', style: { margin: '2px 0 0' } }, voiceHint),
+          !voiceLoading && !currentVoiceAvailable && voiceList.length > 0
+            ? h('div', { className: 'dsc-row-hint', style: { margin: '2px 0 0' } },
+                `当前保存的声线「${currentVoiceId || '未选择'}」暂不可用，配置已保留；选择其它声线会覆盖它。`)
+            : null,
+          voiceManaged && voiceData?.modelDir
+            ? h('div', { className: 'dsc-row-hint', style: { margin: '2px 0 0' } }, `声线模型目录：${voiceData.modelDir}`)
+            : null,
           h(Row, { label: '音调（半音）' },
             h('input', { className: 'dsc-number', type: 'number', min: -12, max: 12, value: draft.voice.pitch, onChange: (e) => set('voice.pitch', Number(e.target.value)) }),
             h('span', { className: 'dsc-sub' }, '（男声线想更自然可 -2 ~ -4）'),
@@ -965,6 +1112,7 @@ window.__ModuleLoader__.load({
       const [snapshot, setSnapshot] = useState(null);
       const [models, setModels] = useState(null);
       const [voices, setVoices] = useState([]);
+      const [voiceState, setVoiceState] = useState({ loading: true, error: '', data: null });
       const [tab, setTab] = useState('chat');
       const [error, setError] = useState('');
       const [notice, setNotice] = useState('');
@@ -975,6 +1123,29 @@ window.__ModuleLoader__.load({
       const chatRef = useRef(null);
       const aliveRef = useRef(true);
       const visible = props?.visible !== false;
+
+      // 声线目录：force=1 绕过宿主的 60 秒缓存；加载中允许有限次重试（服务刚启动时用）
+      const refreshVoices = useCallback(async ({ force = true, retries = 0 } = {}) => {
+        if (aliveRef.current) setVoiceState((previous) => ({ ...previous, loading: true, error: '' }));
+        let lastError = null;
+        for (let attempt = 0; attempt <= retries; attempt += 1) {
+          try {
+            const data = await apiGet(`/voices${force ? '?force=1' : ''}`);
+            if (!aliveRef.current) return data;
+            const list = Array.isArray(data?.voices) ? data.voices : [];
+            setVoices(list);
+            setVoiceState({ loading: false, error: '', data });
+            return data;
+          } catch (error) {
+            lastError = error;
+            if (attempt < retries) await new Promise((resolve) => setTimeout(resolve, 700 + attempt * 800));
+          }
+        }
+        if (aliveRef.current) {
+          setVoiceState((previous) => ({ ...previous, loading: false, error: lastError?.message || '读取声线失败' }));
+        }
+        return null;
+      }, []);
 
       const notify = useCallback((message, kind = 'info') => {
         setNotice(message);
@@ -999,7 +1170,7 @@ window.__ModuleLoader__.load({
         aliveRef.current = true;
         void refresh();
         void apiGet('/models').then(setModels).catch(() => {});
-        void apiGet('/voices').then((data) => setVoices(data.voices ?? [])).catch(() => {});
+        void refreshVoices({ force: true, retries: 3 });
         const timer = setInterval(() => {
           if (document.visibilityState === 'hidden') return;
           void refresh();
@@ -1015,6 +1186,14 @@ window.__ModuleLoader__.load({
         if (!node) return;
         node.scrollTop = node.scrollHeight;
       }, [snapshot?.history?.length, snapshot?.phase]);
+
+      // 服务从“未启动”变成“已启动”时自动恢复下拉框，不需要刷新整个 DSH
+      const previousVoiceServiceOk = useRef(true);
+      useEffect(() => {
+        const ok = Boolean(snapshot?.services?.voice?.ok);
+        if (ok && !previousVoiceServiceOk.current) void refreshVoices({ force: true, retries: 3 });
+        previousVoiceServiceOk.current = ok;
+      }, [snapshot?.services?.voice?.ok, refreshVoices]);
 
       const history = snapshot?.history ?? [];
       companionName = snapshot?.config?.persona?.name || '陪玩';
@@ -1195,7 +1374,7 @@ window.__ModuleLoader__.load({
                 h('button', { className: 'dsc-btn primary', disabled: sending || !draft.trim(), onClick: doSend }, sending ? '…' : h(Icon, { path: ICONS.send })),
               ),
             )
-          : h(SettingsView, { snapshot, models, voices, notify, onSaved: (config) => setSnapshot((previous) => (previous ? { ...previous, config } : previous)) }),
+          : h(SettingsView, { snapshot, models, voices, voiceState, onRefreshVoices: refreshVoices, notify, onSaved: (config) => setSnapshot((previous) => (previous ? { ...previous, config } : previous)) }),
 
         h(
           'div',
@@ -1316,6 +1495,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    return { name: 'dsh-companion', inject, apply };
+    return { name: '@jyddwy/dsh-companion', inject, apply };
   },
 });

@@ -63,6 +63,8 @@ export function makeVoice({ getConfig, log }) {
       voiceCache = { at: Date.now(), value: voices };
       return voices;
     } catch {
+      // 强制刷新失败时清掉旧缓存，避免下一次普通读取又拿回过期清单
+      if (force) voiceCache = { at: 0, value: null };
       return [];
     }
   }

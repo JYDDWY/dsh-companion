@@ -5,7 +5,7 @@
 // 静态裸 import 会解析失败并让整个插件**静默**不生效。需要的能力全部走 ctx 注入的服务。
 import { apply as applyCompanion } from './src/host/plugin.mjs';
 
-export const name = 'dsh-companion';
+export const name = '@jyddwy/dsh-companion';
 
 /**
  * 依赖的宿主服务：

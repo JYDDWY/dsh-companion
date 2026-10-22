@@ -35,6 +35,8 @@ if (-not $PluginDir) {
   $pluginCandidates = @(
     $PSScriptRoot,
     (Join-Path $PSScriptRoot 'dsh-companion'),
+    (Join-Path $taskDshHome 'profiles\desktop\node_modules\@jyddwy\dsh-companion'),
+    (Join-Path $taskDshHome 'profiles\web\node_modules\@jyddwy\dsh-companion'),
     (Join-Path $taskDshHome 'profiles\desktop\node_modules\dsh-companion'),
     (Join-Path $taskDshHome 'profiles\web\node_modules\dsh-companion')
   )
@@ -45,7 +47,8 @@ $PluginDir = [System.IO.Path]::GetFullPath($PluginDir)
 $packageFile = Join-Path $PluginDir 'package.json'
 if (-not (Test-Path -LiteralPath $packageFile)) { Fail ('Missing package.json: ' + $PluginDir) }
 $packageInfo = [System.IO.File]::ReadAllText($packageFile) | ConvertFrom-Json
-if ($packageInfo.name -ne 'dsh-companion') { Fail 'PluginDir must point to the dsh-companion base plugin.' }
+if ($packageInfo.name -notin @('dsh-companion', '@jyddwy/dsh-companion')) { Fail 'PluginDir must point to the dsh-companion base plugin.' }
+if (-not (Test-Path -LiteralPath (Join-Path $PluginDir 'src\host\plugin.mjs')) -or -not (Test-Path -LiteralPath (Join-Path $PluginDir 'services\capture_server.py'))) { Fail 'This is a different project using the same unscoped package name.' }
 $voiceDir = Join-Path $PluginDir 'services\voice'
 $venvDir = Join-Path $voiceDir '.venv'
 $venvPython = Join-Path $venvDir 'Scripts\python.exe'

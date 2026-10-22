@@ -1,63 +1,19 @@
-# 安装、更新与卸载
+# 通过 DSH 官方入口安装
 
-## 安装前
+1. 安装并启动 DSH 0.2.x，确认配置的模型可用。
+2. 打开「插件 → 添加插件」，输入 `@jyddwy/dsh-companion@1.9.6-test4`。
+3. 选择安装源；国内用户可选「中国大陆镜像源」，镜像需已同步此版本。
+4. 点击安装，完成后按提示刷新或重启 DSH。
+5. 在右侧「陪玩」点「看一眼」，验证截图、回复和系统语音。
 
-1. 在 Windows 上安装并启动一次 DSH，让它创建用户 profile。
-2. 确认 DSH 的模型配置可以正常使用，并准备一个支持图片输入的模型。
-3. 将插件放到准备长期保留的目录。该目录中应能看到 `package.json`、`安装.cmd` 和 `install.ps1`。
+更新与卸载通过 DSH 插件管理页执行。npm 包由 DSH 管理，基础功能无需另行运行安装脚本。
 
-基础插件可用 PowerShell 截图和 Windows 系统语音，不要求另装 Python 或 RVC。
+用户配置、历史和世界书保存在 DSH 数据目录的 `dsh-companion/`。截图会发送给 DSH 中配置的模型服务商，已知问题见 README。
 
-## 推荐安装方式
+可选 RVC 增强：打开「陪玩 → 设置 → 声音」，点击「下载并安装语音增强（CPU）」。无需访问 GitHub，无需手动下载增强 ZIP。安装完成后按 [模型指南](docs/RVC-声线下载指南.md) 自行下载模型，再选择相应声线并重启语音。
 
-双击插件目录里的 `安装.cmd`。也可在 PowerShell 中运行（替换为自己的真实路径）：
+环境与模型保存在 DSH 数据目录的 `dsh-companion/voice/`，不放在 npm 插件目录中，更新主插件会保留它们。取消或安装失败不会替换已启用的旧环境。安装器只操作自己的独立 Python，不修改系统 Python。
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "<插件目录>\install.ps1"
-```
+安装日志可在设置面板展开查看，状态保存于 `dsh-companion/voice/install-status.json`。如果退出 DSH 导致中断，重新打开设置可重试。国内镜像也可能暂时不可用，错误会显示在面板中。
 
-脚本默认寻找 `%USERPROFILE%\.dsh` 或 `DSH_HOME`，并优先使用已初始化的 desktop profile。它会备份配置、登记 bundle、添加 link 依赖，并创建目录链接。不会执行 pnpm install。
-
-安装后重启 DSH，在插件列表和右侧边栏里检查“陪玩”，再点“看一眼”验证。插件安装后仍使用原来的目录，不能随意移动或删除。
-
-## 其他安装参数
-
-```powershell
-# 指定 web profile
-powershell -NoProfile -ExecutionPolicy Bypass -File "<插件目录>\install.ps1" -ProfileName web
-
-# 指定自己的 DSH 数据目录
-powershell -NoProfile -ExecutionPolicy Bypass -File "<插件目录>\install.ps1" -DshHome "<DSH数据目录>"
-
-# file 路径方式安装：宿主可热加载，面板需刷新；不出现在已安装插件列表
-powershell -NoProfile -ExecutionPolicy Bypass -File "<插件目录>\install.ps1" -Hot
-```
-
-正式 bundle 与 file 路径方式不应重复挂载同一插件。首次使用建议采用默认方式，按安装器输出操作。
-
-## 更新
-
-保留原来的插件目录位置，用新版本文件更新，再重新执行安装器并重启 DSH。如果改用新目录，应重新运行该新目录中的安装器以更新链接。
-
-用户配置、历史和世界书保存在 DSH 数据目录的 `dsh-companion/` 中。
-
-## 卸载
-
-双击插件目录中的 `卸载.cmd`，或运行：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "<插件目录>\install.ps1" -Uninstall
-```
-
-完成后重启 DSH。卸载器移除安装登记与目录链接，用户数据保留在 DSH 数据目录。
-
-## 排查安装问题
-
-- 找不到 profile：确认已启动过 DSH，或用参数指定数据目录与 profile。
-- 找不到安装器：确认压缩包已经完整解压，当前目录中有 `install.ps1`。
-- 面板没有出现：重启 DSH，并在插件列表检查状态。
-- 没有声音：检查朗读开关，基础包可选择“系统语音”后端。
-- 模型报错：在插件设置中确认识图模型支持图片、服务商配置可用。
-- 日志：默认在 `%USERPROFILE%\.dsh\dsh-companion\companion.log`。
-
-截图会发给配置的模型服务商；当前测试版的已知问题见 [README.md](README.md)。
+GitHub 源码/旧 ZIP 中的 junction 安装方式适用于原独立目录版本；不要与本 npm 安装方式重复登记。

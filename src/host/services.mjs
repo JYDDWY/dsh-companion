@@ -11,6 +11,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dataDir } from './config.mjs';
 import { errorText } from './util.mjs';
+import { installedVoiceRuntime, modelFiles } from './voice-runtime.mjs';
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const SERVICES_DIR = path.join(dataDir(), 'services');
@@ -79,12 +80,20 @@ export function makeServices({ getConfig, log }) {
 
   function serviceSpec(kind) {
     const config = getConfig();
-    const script = firstExisting(scriptCandidates(kind, kind === 'capture' ? config.services.captureScript : config.services.voiceScript));
-    const python = firstExisting(pythonCandidates(kind, kind === 'capture' ? config.services.capturePython : config.services.voicePython));
+    const runtime = kind === 'voice' ? installedVoiceRuntime() : null;
+    const configuredScript = kind === 'capture' ? config.services.captureScript : config.services.voiceScript;
+    const script = firstExisting([configuredScript, runtime?.script, ...scriptCandidates(kind, configuredScript)].filter(Boolean));
+    const managed = Boolean(runtime && script === runtime.script);
+    const availableVoices = managed ? modelFiles(runtime.models).voices.map(name => name.slice(0, -4)) : [];
+    const python = managed
+      ? firstExisting([config.services.voicePython, process.env.DSH_COMPANION_VOICE_PYTHON, runtime.python].filter(Boolean))
+      : firstExisting(pythonCandidates(kind, kind === 'capture' ? config.services.capturePython : config.services.voicePython));
     const port = kind === 'capture'
       ? Number(new URL(config.services.captureUrl).port || 9124)
       : Number(new URL(config.services.voiceUrl).port || 9123);
-    return { script, python, port, url: kind === 'capture' ? config.services.captureUrl : config.services.voiceUrl };
+    return { script, python, port, url: kind === 'capture' ? config.services.captureUrl : config.services.voiceUrl,
+      rvc: managed ? runtime.rvc : null, voiceId: managed ? (availableVoices.includes(config.voice.voiceId) ? config.voice.voiceId : availableVoices[0]) : null,
+      missingModels: managed && !process.env.RVC_HOME && !modelFiles(runtime.models).present };
   }
 
   /** 探服务健康（由调用方传入 fetcher，避免这里依赖 capture/voice 模块）。 */
@@ -113,6 +122,11 @@ export function makeServices({ getConfig, log }) {
     const now = await probe();
     if (now.ok) return { ok: true, already: true };
 
+    if (spec.missingModels) {
+      state.lastError = '语音增强环境已安装，请在设置的语音增强区域补齐模型后重启语音';
+      return { ok: false, error: state.lastError };
+    }
+
     if (!spec.script || !spec.python) {
       state.lastError = !spec.script ? '找不到服务脚本' : '找不到 Python 解释器';
       return { ok: false, error: state.lastError, script: spec.script, python: spec.python };
@@ -125,13 +139,14 @@ export function makeServices({ getConfig, log }) {
       const logStream = createWriteStream(logPath, { flags: 'a' });
       state.logStream = logStream;
       const args = [spec.script, '--port', String(spec.port), '--host', '127.0.0.1'];
+      if (kind === 'voice' && spec.voiceId) args.push('--voice', spec.voiceId);
       const env = {
         ...process.env,
         PYTHONIOENCODING: 'utf-8',
         PYTHONUNBUFFERED: '1',
       };
       // 发行包的语音增强目录里自带一份 RVC 推理工程：告诉 voice_service 去哪里找
-      const bundledRvc = path.join(PACKAGE_ROOT, 'services', 'voice', 'rvc');
+      const bundledRvc = spec.rvc || path.join(PACKAGE_ROOT, 'services', 'voice', 'rvc');
       if (kind === 'voice' && !env.RVC_HOME && existsSync(bundledRvc)) env.RVC_HOME = bundledRvc;
       // 告诉 voice_service 用哪个解释器拉 RVC worker（发行包里就是刚找到的 .venv python）
       if (kind === 'voice' && !env.RVC_PYTHON) env.RVC_PYTHON = spec.python;

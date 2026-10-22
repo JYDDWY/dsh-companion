@@ -8,4 +8,4 @@
 # 同一个 id 出现两行时，DSH 的配置树会整行都不挂（静默失效），切换安装方式时务必删掉另一种。
 - insert:
     - id: dsh-companion
-      name: 'dsh-companion'
+      name: '@jyddwy/dsh-companion'

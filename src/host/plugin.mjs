@@ -5,6 +5,7 @@
 import { makeEngine } from './engine.mjs';
 import { makeRoutes } from './routes.mjs';
 import { makeLogger, errorText } from './util.mjs';
+import { makeVoiceInstaller } from './voice-install.mjs';
 
 export const ROUTE_PREFIX = '/dsh-companion';
 
@@ -24,7 +25,8 @@ export function apply(ctx, config) {
   void engine.init().catch((error) => log.error(`初始化失败：${errorText(error)}`));
 
   // 路由
-  const routes = makeRoutes({ ctx, engine, log, prefix: ROUTE_PREFIX });
+  const voiceInstaller = makeVoiceInstaller({ log });
+  const routes = makeRoutes({ ctx, engine, log, prefix: ROUTE_PREFIX, voiceInstaller });
   ctx.effect(
     () =>
       ctx.webServer.register({
@@ -39,7 +41,7 @@ export function apply(ctx, config) {
   ctx.effect(
     () => () => {
       log.info('插件卸载，正在收尾');
-      void engine.dispose().catch((error) => log.warn(`收尾失败：${errorText(error)}`));
+      void voiceInstaller.dispose().finally(() => engine.dispose()).catch((error) => log.warn(`收尾失败：${errorText(error)}`));
     },
     'dsh-companion: lifecycle',
   );
