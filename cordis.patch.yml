@@ -1,0 +1,11 @@
+# dsh-companion 的 bundle patch。
+#
+# 用途：当本包作为「bundle」被安装进某个 profile 时（package.json 依赖 + dsh.profile.bundles
+# 里出现本包名），DSH 会把这一层的 patch 叠加到配置树上，这一行就是宿主半侧的挂载点。
+#
+# 注意：如果使用安装脚本的「免重启（file 路径行）」方式，profile 自己的 cordis.patch.yml
+# 里会直接插一行 name: <本包绝对路径>/index.js —— 那条路径行与这里的 insert 是**二选一**：
+# 同一个 id 出现两行时，DSH 的配置树会整行都不挂（静默失效），切换安装方式时务必删掉另一种。
+- insert:
+    - id: dsh-companion
+      name: 'dsh-companion'

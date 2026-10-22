@@ -1,0 +1,18 @@
+{
+  "host": "127.0.0.1",
+  "port": 9123,
+  "device": "",
+  "defaultVoice": "march7",
+  "speed": 1.0,
+  "pitch": 0,
+  "f0Method": "rmvpe",
+  "indexRate": 0.75,
+  "protect": 0.33,
+  "tts": "auto",
+  "maxChars": 2000,
+  "maxQueuedSentences": 8,
+  "rvcModelCache": 3,
+  "preloadDefaultVoice": true,
+  "logFile": "",
+  "logLevel": "INFO"
+}

@@ -1,0 +1,14 @@
+# RVC 推理依赖（torch / torchaudio 由安装脚本单独从 PyTorch 官方源安装）
+setuptools>=75,<81
+numpy==1.26.4
+scipy>=1.13.1,<2
+librosa>=0.10.2,<0.11
+numba==0.61.2
+faiss-cpu>=1.13,<2
+praat-parselmouth>=0.4.5,<1
+sounddevice>=0.5,<1
+soundfile>=0.13,<1
+transformers>=4.49,<4.50
+einops>=0.8,<1
+PyYAML>=6
+tqdm>=4.67,<5

@@ -1,0 +1,10 @@
+{
+  "meta": {
+    "title": "Companion",
+    "description": "A companion for gaming, watching anime/dramas and coding: periodically reads the screen, responds in character and speaks through local TTS. Sidebar panel to toggle, tune, review and chat."
+  },
+  "tab": {
+    "title": "Companion",
+    "description": "A companion for gaming, watching anime/dramas and coding: cheers, comments, analyzes, chats, voiced locally."
+  }
+}
