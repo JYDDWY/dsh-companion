@@ -552,6 +552,8 @@ function normalizeEmotion(raw) {
   return 'neutral';
 }
 
+export { normalizeEmotion };
+
 const EMOTION_TAG = /^\s*[【\[]\s*情绪\s*[:：]\s*([^】\]\n]{1,16}?)\s*[】\]]\s*(.*)$/s;
 
 /**
@@ -583,6 +585,154 @@ export function splitEmotion(raw) {
     };
   }
   return { text: trimmed, emotion: 'neutral' };
+}
+
+/** 从文本里抠出第一个完整的 JSON 数组（容忍代码围栏和前后废话）。 */
+function extractJsonArray(text) {
+  const raw = String(text ?? '').trim();
+  const fenced = raw.replace(/```(?:json)?/gi, '').trim();
+  const start = fenced.indexOf('[');
+  if (start < 0) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < fenced.length; index += 1) {
+    const char = fenced[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === String.fromCharCode(92)) escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === '[') depth += 1;
+    else if (char === ']') {
+      depth -= 1;
+      if (depth === 0) {
+        try {
+          return JSON.parse(fenced.slice(start, index + 1));
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function matchCastRole(value, roles) {
+  const key = String(value ?? '').trim().toLowerCase();
+  if (!key) return null;
+  return roles.find((role) => {
+    const id = String(role?.id ?? '').trim().toLowerCase();
+    const name = String(role?.name ?? '').trim().toLowerCase();
+    return (id && id === key) || (name && name === key);
+  }) ?? null;
+}
+
+function cleanCastLine(value, role) {
+  let text = sanitizeSpeech(String(value ?? '').trim());
+  if (!text) return '';
+  const prefix = `${role?.name ?? ''}：`;
+  if (role?.name && text.startsWith(prefix)) text = text.slice(prefix.length).trim();
+  return text.replace(/\s+/g, ' ').slice(0, 120);
+}
+
+/**
+ * 解析「一人分饰多角」剧本。优先解析严格 JSON：
+ *   {"lines":[{"role":"r1","emotion":"开心","text":"..."}]}
+ * 也兼容对象按角色 id/名字映射、以及逐行「角色名：台词」的兜底格式。
+ * 返回的 lines 已消毒，每个角色最多一条，按模型给的顺序排列。
+ */
+export function parseCastScript(raw, roles) {
+  const list = Array.isArray(roles) ? roles.filter((role) => role?.id) : [];
+  if (list.length === 0) return { lines: [], error: '没有可用的角色' };
+  const lines = [];
+  const seen = new Set();
+
+  const pushLine = (role, textValue, emotionValue) => {
+    if (!role || seen.has(role.id)) return false;
+    const parsed = splitEmotion(String(textValue ?? ''));
+    const text = cleanCastLine(parsed.text, role);
+    if (!text) return false;
+    const emotion = normalizeEmotion(emotionValue ?? parsed.emotion);
+    seen.add(role.id);
+    lines.push({ roleId: role.id, name: role.name, emotion, text });
+    return true;
+  };
+
+  const parsedObject = extractJsonObject(raw);
+  if (parsedObject && typeof parsedObject === 'object') {
+    let items = [];
+    if (Array.isArray(parsedObject.lines)) items = parsedObject.lines;
+    else if (Array.isArray(parsedObject.dialogue)) items = parsedObject.dialogue;
+    else if (Array.isArray(parsedObject.script)) items = parsedObject.script;
+    for (const item of items) {
+      if (!item || typeof item !== 'object') continue;
+      const role = matchCastRole(item.role ?? item.id ?? item.speaker ?? item.name, list);
+      if (role) pushLine(role, item.text ?? item.say ?? item.line ?? item.content, item.emotion ?? item.mood);
+    }
+    // 也支持 {"r1":"台词","r2":"台词"} 这种简写。
+    if (lines.length === 0) {
+      for (const role of list) {
+        const value = parsedObject[role.id] ?? parsedObject[role.name];
+        if (value != null) pushLine(role, value, null);
+      }
+    }
+  }
+
+  if (lines.length === 0) {
+    const parsedArray = extractJsonArray(raw);
+    if (Array.isArray(parsedArray)) {
+      for (const item of parsedArray) {
+        if (!item || typeof item !== 'object') continue;
+        const role = matchCastRole(item.role ?? item.id ?? item.speaker ?? item.name, list);
+        if (role) pushLine(role, item.text ?? item.say ?? item.line ?? item.content, item.emotion ?? item.mood);
+      }
+    }
+  }
+
+  if (lines.length === 0) {
+    const rawLines = String(raw ?? '')
+      .replace(/```(?:json)?/gi, '')
+      .split(/\r?\n/)
+      .map((line) => line.replace(/^\s*[-*+\d.、)]+\s*/, '').trim())
+      .filter(Boolean);
+    const unmatched = [];
+    for (const rawLine of rawLines) {
+      let role = null;
+      let body = rawLine;
+      for (const candidate of list) {
+        const names = [candidate.id, candidate.name].filter(Boolean);
+        const hit = names.find((name) => rawLine.toLowerCase().startsWith(`${String(name).toLowerCase()}：`)
+          || rawLine.toLowerCase().startsWith(`${String(name).toLowerCase()}:`));
+        if (hit) {
+          role = candidate;
+          body = rawLine.slice(String(hit).length + 1).trim();
+          break;
+        }
+      }
+      if (!role) {
+        unmatched.push(rawLine);
+        continue;
+      }
+      pushLine(role, body, splitEmotion(body).emotion);
+    }
+    // 模型没写角色名、但按顺序给了几行：按角色顺序分配（只在确实有内容时兜底）。
+    if (lines.length === 0 && unmatched.length > 0) {
+      for (const [index, rawLine] of unmatched.slice(0, list.length).entries()) {
+        pushLine(list[index], rawLine, splitEmotion(rawLine).emotion);
+      }
+    }
+  }
+
+  return {
+    lines: lines.slice(0, list.length),
+    error: lines.length > 0 ? null : '没有解析出任何角色台词',
+  };
 }
 
 /** 给日志/历史用的稳定哈希（去重用）。 */

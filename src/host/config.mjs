@@ -6,6 +6,7 @@
 import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { defaultCastConfig, normalizeCast } from './cast.mjs';
 
 /** 数据目录：DSH_HOME/dsh-companion（DSH_HOME 缺失时退到 ~/.dsh）。 */
 export function dataDir() {
@@ -74,8 +75,14 @@ export const DEFAULTS = Object.freeze({
     fontFamily: 'Microsoft YaHei',
     /** 一句字幕停留多少秒 */
     displaySec: 8,
-    /** 字体颜色（#rrggbb） */
-    color: '#ffffff',
+    /** 字幕相对语音开始的额外延时（秒）。0 = 语音一开始就显示；用于补偿不同机器的合成延迟 */
+    delaySec: 0,
+    /** 双色渐变的第一种颜色（#rrggbb），默认偏白 */
+    color: '#eaf6ff',
+    /** 双色渐变的第二种颜色（#rrggbb），默认蓝 */
+    color2: '#4da3ff',
+    /** 鼠标穿透：开启后字幕不挡游戏鼠标；按住 Ctrl 可临时拖动调整位置 */
+    clickThrough: true,
     /** 背景黑底不透明度 0-1 */
     bgOpacity: 0.45,
     /** 整窗不透明度 0.1-1 */
@@ -129,6 +136,8 @@ export const DEFAULTS = Object.freeze({
     /** 额外读取的 AGENTS.md 绝对路径（留空 = 只读 $DSH_HOME/AGENTS.md） */
     extraAgentsMd: '',
   },
+  /** 一人分饰多角：总开关 + 最多 3 个角色槽（角色卡/声线/是否继承 AGENTS.md 各自独立） */
+  cast: defaultCastConfig(),
   /** 行为策略 */
   behavior: {
     /** 只在识别到的「陪伴场景」里工作（场景开关见下） */
@@ -311,10 +320,16 @@ export function normalizeConfig(input) {
   merged.subtitle.enabled = merged.subtitle.enabled === true;
   merged.subtitle.fontSize = Math.round(clampNumber(merged.subtitle.fontSize, 28, 12, 96));
   merged.subtitle.displaySec = Math.round(clampNumber(merged.subtitle.displaySec, 8, 2, 60));
+  merged.subtitle.delaySec = Math.round(clampNumber(merged.subtitle.delaySec, 0, 0, 10) * 10) / 10;
   merged.subtitle.bgOpacity = Math.round(clampNumber(merged.subtitle.bgOpacity, 0.45, 0, 1) * 100) / 100;
   merged.subtitle.opacity = Math.round(clampNumber(merged.subtitle.opacity, 0.95, 0.1, 1) * 100) / 100;
   merged.subtitle.fontFamily = String(merged.subtitle.fontFamily ?? '').trim().slice(0, 60) || 'Microsoft YaHei';
-  merged.subtitle.color = /^#[0-9a-f]{6}$/i.test(String(merged.subtitle.color ?? '')) ? merged.subtitle.color : '#ffffff';
+  merged.subtitle.color = /^#[0-9a-f]{6}$/i.test(String(merged.subtitle.color ?? '')) ? merged.subtitle.color : '#eaf6ff';
+  merged.subtitle.color2 = /^#[0-9a-f]{6}$/i.test(String(merged.subtitle.color2 ?? ''))
+    ? merged.subtitle.color2
+    : merged.subtitle.color;
+  merged.subtitle.clickThrough = merged.subtitle.clickThrough !== false;
+  merged.cast = normalizeCast(merged.cast);
   merged.worldbook.enabled = merged.worldbook.enabled !== false;
   merged.worldbook.autoResearch = merged.worldbook.autoResearch !== false;
   merged.worldbook.maxPromptChars = Math.round(clampNumber(merged.worldbook.maxPromptChars, 1400, 400, 4000));

@@ -97,10 +97,12 @@ def _interp(shape: tuple, position: float) -> int:
 # 情绪表（9 种，与插件契约一致：neutral/happy/excited/tsukkomi/serious/
 # gentle/surprised/smug/sigh；缺省/未知按 neutral）。
 #
-# 轮廓设计原则：
-#   - pitch_shape 让一句话内部有明确的音高走向（上涨/下落/波浪），这是「不捧读」的关键；
-#   - rate_shape 制造快慢对比（吐槽的停顿、无奈的拖长）；
-#   - pause_shape / tail_pause_ms 控制分句之间与句与句之间的停顿。
+# 轮廓设计原则（2026-10-23 按 march7 实测收敛过一版）：
+#   - 情绪只做「轻微」的音高/语速/停顿偏移，不再追求夸张；
+#   - pitch 总偏移限制在 ±22Hz 左右，避免 RVC 后被放大成换人感；
+#   - 分句停顿不再低于 ~160ms，避免逗号被吞掉后突然窜音高；
+#   - volume 归零，减少分句拼接处的电平台阶。
+# 实测依据见 artifacts/emotion-experiment-march7.md（不入包）。
 # ---------------------------------------------------------------------------
 EMOTIONS: dict[str, EmotionPlan] = {
     "neutral": EmotionPlan(
@@ -111,68 +113,68 @@ EMOTIONS: dict[str, EmotionPlan] = {
         desc="不加任何情绪修饰，与旧版本逐字节同路径",
     ),
     "happy": EmotionPlan(
-        id="happy", label="开心",
-        rate=10, pitch=24, volume=3,
-        pitch_shape=(5, 40, -15), rate_shape=(0, 8, 2), volume_shape=(0, 3, 0),
-        pause_shape=(60, 90), tail_pause_ms=120,
-        sentence_pitch_shape=(-8, 14),
-        desc="整体上扬，句内先低后高，尾句带笑意的轻快收尾",
+        id="happy", label="开心（温和档）",
+        rate=5, pitch=8, volume=0,
+        pitch_shape=(2, 13, -5), rate_shape=(0, 4, 2), volume_shape=(0, 0, 0),
+        pause_shape=(180, 220), tail_pause_ms=140,
+        sentence_pitch_shape=(-4, 7),
+        desc="轻微上扬，句内先低后高，保留笑意但不再尖锐",
     ),
     "excited": EmotionPlan(
-        id="excited", label="兴奋",
-        rate=18, pitch=34, volume=6,
-        pitch_shape=(15, 28, -15), rate_shape=(4, 18, 10), volume_shape=(3, 7, 3),
-        pause_shape=(30, 50), tail_pause_ms=60,
-        sentence_pitch_shape=(18, -8),
-        desc="音高高、语速快、句间几乎不停顿，开场最冲",
+        id="excited", label="兴奋（温和档）",
+        rate=8, pitch=11, volume=0,
+        pitch_shape=(5, 9, -5), rate_shape=(2, 9, 5), volume_shape=(0, 0, 0),
+        pause_shape=(160, 200), tail_pause_ms=100,
+        sentence_pitch_shape=(9, -4),
+        desc="略快略高，开场有冲劲，但不至于把逗号吞掉",
     ),
     "tsukkomi": EmotionPlan(
-        id="tsukkomi", label="吐槽",
-        rate=6, pitch=8, volume=1,
-        pitch_shape=(35, -25, -20), rate_shape=(4, -10, 8), volume_shape=(0, -2, 2),
-        pause_shape=(220, 140), tail_pause_ms=180,
-        sentence_pitch_shape=(28, -12),
-        desc="问句拔高、后半句压低，问句后故意停顿，收尾带嫌弃感",
+        id="tsukkomi", label="吐槽（温和档）",
+        rate=3, pitch=3, volume=0,
+        pitch_shape=(12, -8, -7), rate_shape=(2, -5, 4), volume_shape=(0, 0, 0),
+        pause_shape=(200, 180), tail_pause_ms=140,
+        sentence_pitch_shape=(14, -6),
+        desc="问句轻挑、后半句轻压，保留嫌弃感但幅度收小",
     ),
     "serious": EmotionPlan(
-        id="serious", label="认真",
-        rate=-8, pitch=-8, volume=2,
-        pitch_shape=(-2, -6, -2), rate_shape=(-4, -10, -6), volume_shape=(1, 2, 1),
-        pause_shape=(150, 220), tail_pause_ms=260,
-        sentence_pitch_shape=(-2, -8),
-        desc="压低、放慢、起伏很小，显沉稳",
+        id="serious", label="认真（温和档）",
+        rate=-5, pitch=-3, volume=0,
+        pitch_shape=(-1, -2, -1), rate_shape=(-2, -5, -3), volume_shape=(0, 0, 0),
+        pause_shape=(170, 200), tail_pause_ms=160,
+        sentence_pitch_shape=(-1, -4),
+        desc="略低略慢、起伏很小，显沉稳",
     ),
     "gentle": EmotionPlan(
-        id="gentle", label="温柔",
-        rate=-12, pitch=6, volume=-5,
-        pitch_shape=(0, 30, -20), rate_shape=(-6, -16, -10), volume_shape=(-2, -4, -3),
-        pause_shape=(180, 260), tail_pause_ms=300,
-        sentence_pitch_shape=(-2, 10),
-        desc="轻声慢语，句中略上扬、句末柔落",
+        id="gentle", label="温柔（温和档）",
+        rate=-7, pitch=2, volume=0,
+        pitch_shape=(0, 10, -7), rate_shape=(-3, -8, -5), volume_shape=(0, 0, 0),
+        pause_shape=(200, 240), tail_pause_ms=180,
+        sentence_pitch_shape=(-1, 5),
+        desc="轻声慢语，句中轻扬、句末柔落",
     ),
     "surprised": EmotionPlan(
-        id="surprised", label="惊讶",
-        rate=4, pitch=22, volume=5,
-        pitch_shape=(40, 20, 0), rate_shape=(2, 4, 0), volume_shape=(4, 3, 1),
-        pause_shape=(260, 180), tail_pause_ms=220,
-        sentence_pitch_shape=(20, -8),
-        desc="开口很高，问句后有明显停顿，后半段回落",
+        id="surprised", label="惊讶（温和档）",
+        rate=2, pitch=7, volume=0,
+        pitch_shape=(13, 7, 0), rate_shape=(1, 2, 0), volume_shape=(0, 0, 0),
+        pause_shape=(240, 220), tail_pause_ms=160,
+        sentence_pitch_shape=(10, -4),
+        desc="开口略高，停顿自然，后半段回落",
     ),
     "smug": EmotionPlan(
-        id="smug", label="坏笑",
-        rate=-6, pitch=10, volume=0,
-        pitch_shape=(-15, 5, 30), rate_shape=(-4, -12, -8), volume_shape=(0, 0, 2),
-        pause_shape=(220, 260), tail_pause_ms=240,
-        sentence_pitch_shape=(-10, 22),
-        desc="慢条斯理，尾句故意上挑，带一点得意的拖腔",
+        id="smug", label="坏笑（温和档）",
+        rate=-4, pitch=3, volume=0,
+        pitch_shape=(-5, 2, 10), rate_shape=(-2, -6, -4), volume_shape=(0, 0, 0),
+        pause_shape=(220, 230), tail_pause_ms=160,
+        sentence_pitch_shape=(-5, 11),
+        desc="慢条斯理，尾句轻挑，保留一点得意拖腔",
     ),
     "sigh": EmotionPlan(
-        id="sigh", label="无奈",
-        rate=-14, pitch=-16, volume=-5,
-        pitch_shape=(20, -25, -45), rate_shape=(-8, -18, -24), volume_shape=(-3, -6, -8),
-        pause_shape=(280, 360), tail_pause_ms=420,
-        sentence_pitch_shape=(30, -32),
-        desc="一路下沉、越说越慢，句间停顿最长",
+        id="sigh", label="无奈（温和档）",
+        rate=-8, pitch=-5, volume=0,
+        pitch_shape=(6, -8, -15), rate_shape=(-4, -9, -12), volume_shape=(0, 0, 0),
+        pause_shape=(260, 300), tail_pause_ms=200,
+        sentence_pitch_shape=(15, -16),
+        desc="一路轻沉、越说越慢，但不再掉近一个八度",
     ),
 }
 
@@ -281,6 +283,16 @@ def _clamp(value: int, low: int, high: int) -> int:
     return int(max(low, min(high, value)))
 
 
+# 2026-10-23 march7 实测后的安全边界：
+#   - 标称 pitch 会被 edge-tts 放大 ~1.7 倍，超过 ±22Hz 就容易「换人感」；
+#   - 情绪带来的额外语速偏移控制在 ±12%；
+#   - 分句停顿低于 140ms 会把逗号吞掉，高于 320ms 又显得拖。
+MAX_EMOTION_PITCH_HZ = 22
+MAX_EMOTION_RATE_PCT = 12
+MIN_EMOTION_PAUSE_MS = 140
+MAX_EMOTION_PAUSE_MS = 320
+
+
 def build_segments(
     text: str, plan: EmotionPlan, speed: float = 1.0, sentence_pos: float = 0.5
 ) -> list[dict]:
@@ -299,12 +311,17 @@ def build_segments(
     segments = []
     for i, clause in enumerate(clauses):
         pos = (i / (n - 1)) if n > 1 else 0.5
-        rate = _clamp(base_rate + plan.rate + plan.rate_at(pos) + sent_rate, -50, 100)
-        pitch = _clamp(plan.pitch + plan.pitch_at(pos) + sent_pitch, -80, 80)
-        volume = _clamp(plan.volume + plan.volume_at(pos), -50, 50)
-        # 段后停顿：最后一段用句末停顿（由服务在 RVC 后补齐），这里负责分句之间
+        emotion_rate = _clamp(plan.rate + plan.rate_at(pos) + sent_rate, -MAX_EMOTION_RATE_PCT, MAX_EMOTION_RATE_PCT)
+        rate = _clamp(base_rate + emotion_rate, -50, 100)
+        pitch = _clamp(plan.pitch + plan.pitch_at(pos) + sent_pitch, -MAX_EMOTION_PITCH_HZ, MAX_EMOTION_PITCH_HZ)
+        volume = _clamp(plan.volume + plan.volume_at(pos), -3, 3)
+        # 段后停顿：最后一段用句末停顿（由服务在 RVC 后补齐），这里负责分句之间。
+        # neutral 保留旧路径（不会进情绪合成），但函数被直接调用时也不要凭空插 140ms。
         if i < n - 1:
-            pause_after = _clamp(plan.pause_at(pos), 0, 1200)
+            if plan.id == "neutral":
+                pause_after = _clamp(plan.pause_at(pos), 0, 1200)
+            else:
+                pause_after = _clamp(plan.pause_at(pos), MIN_EMOTION_PAUSE_MS, MAX_EMOTION_PAUSE_MS)
         else:
             pause_after = 0
         segments.append(

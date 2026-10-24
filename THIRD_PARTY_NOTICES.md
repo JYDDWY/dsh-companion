@@ -11,4 +11,4 @@
 
 运行时使用 Windows SAPI，以及 DSH 提供的模型、网页、附件和 WebServer 能力。
 
-RVC、edge-tts 和声线模型属于可选语音增强链路。项目语音服务源码位于 `voice-enhancement/`；独立公开增强 ZIP 包含 RVC 推理代码与依赖并保留许可证，不包含任何模型权重。RVC 上游来源为 https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI 。
+RVC、edge-tts 和声线模型属于可选语音增强链路。项目语音服务源码位于 `voice-enhancement/`；独立公开 runtime 包包含 RVC 推理代码与依赖并保留许可证，不包含任何模型权重。RVC 上游来源为 https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI 。

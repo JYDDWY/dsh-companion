@@ -70,6 +70,22 @@ window.__ModuleLoader__.load({
       { id: 'custom', name: '自定义（自己填下面的值）' },
     ];
 
+    const SUBTITLE_PALETTES = [
+      { id: 'bluewhite', name: '蓝白', color: '#eaf6ff', color2: '#4da3ff' },
+      { id: 'pinkpurple', name: '粉紫', color: '#ffe8f5', color2: '#ff77c8' },
+      { id: 'mint', name: '青绿', color: '#e9fff6', color2: '#32d6a0' },
+      { id: 'amber', name: '橙金', color: '#fff4df', color2: '#ffb13b' },
+      { id: 'ice', name: '冰蓝', color: '#e8fbff', color2: '#7be0ff' },
+    ];
+
+    // 与 src/host/cast.mjs 的 ROLE_CARDS 保持一致；这里只需要展示名和 id。
+    const CAST_ROLE_CARDS = [
+      { id: 'gentle', name: '温柔陪伴', blurb: '轻声接住情绪，先安慰再建议。' },
+      { id: 'tsundere', name: '损友吐槽', blurb: '嘴硬心软，专挑槽点但站你这边。' },
+      { id: 'cheerful', name: '元气捧场', blurb: '情绪外放，负责起哄和喝彩。' },
+      { id: 'analyst', name: '冷静军师', blurb: '先观察再判断，负责局势分析。' },
+    ];
+
     const PHASE_TEXT = {
       paused: '已暂停',
       idle: '待命中',
@@ -170,6 +186,14 @@ window.__ModuleLoader__.load({
   color:${COLORS.text}; border-radius:7px; padding:6px 8px; font-size:12px; font-family:inherit; line-height:1.55; outline:none; }
 .dsc-textarea:focus { border-color:${COLORS.accent}; }
 .dsc-check { width:14px; height:14px; accent-color:${COLORS.accent}; }
+.dsc-color { width:36px; height:26px; padding:2px; border:1px solid ${COLORS.border}; border-radius:6px; background:${COLORS.layer}; cursor:pointer; }
+.dsc-gradient-preview { width:78px; height:18px; border-radius:999px; border:1px solid ${COLORS.border}; }
+.dsc-palette { border:1px solid ${COLORS.border}; background:${COLORS.layer}; border-radius:6px; padding:2px 7px; font-size:11px; color:${COLORS.secondary}; cursor:pointer; }
+.dsc-cast-card { border:1px solid ${COLORS.border}; border-radius:8px; padding:8px 9px; background:${COLORS.layer2}; display:flex; flex-direction:column; gap:6px; }
+.dsc-cast-head { display:flex; align-items:center; gap:8px; font-weight:600; font-size:12px; }
+.dsc-cast-head .dsc-spacer { flex:1 1 auto; }
+.dsc-cast-line { line-height:1.55; }
+.dsc-cast-speaker { color:${COLORS.accent}; font-weight:600; margin-right:2px; }
 .dsc-footer { flex:0 0 auto; border-top:1px solid ${COLORS.border}; padding:7px 12px; color:${COLORS.tertiary}; font-size:11px;
   display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
 .dsc-pill { display:inline-flex; align-items:center; gap:4px; padding:1px 7px; border-radius:999px; background:${COLORS.layer2}; font-size:10.5px; color:${COLORS.secondary}; }
@@ -270,6 +294,7 @@ window.__ModuleLoader__.load({
 
     function Bubble({ entry, onPreviewFrame }) {
       const isUser = entry.role === 'user';
+      const castLines = !isUser && Array.isArray(entry.castLines) && entry.castLines.length > 0 ? entry.castLines : null;
       const frames = [];
       if (!isUser && entry.tickId && entry.frameCount) {
         const count = Math.min(3, Number(entry.frameCount) || 1);
@@ -282,7 +307,18 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { className: 'dsc-bubble-main' },
-          h('div', { className: 'dsc-bubble-text' }, entry.text),
+          h(
+            'div',
+            { className: 'dsc-bubble-text' },
+            castLines
+              ? castLines.map((line, index) => h(
+                  'div',
+                  { key: `${entry.id}-${index}`, className: 'dsc-cast-line' },
+                  h('span', { className: 'dsc-cast-speaker' }, `${line.name}：`),
+                  line.text,
+                ))
+              : entry.text,
+          ),
           frames.length > 0
             ? h(
                 'div',
@@ -314,7 +350,7 @@ window.__ModuleLoader__.load({
 
     // ── 设置面板 ──────────────────────────────────────────────────────────
 
-    function VoiceInstallPanel({ notify, onVoiceRefresh }) {
+    function VoiceInstallPanel({ notify, onVoiceRefresh, voiceData, snapshot }) {
       const [status, setStatus] = useState(null);
       const [error, setError] = useState('');
       const [busy, setBusy] = useState(false);
@@ -353,6 +389,10 @@ window.__ModuleLoader__.load({
       const running = Boolean(job?.running);
       const modelsReady = Boolean(status?.models?.present);
       const staleJobMessage = Boolean(job && !running && modelsReady && job.phase === 'complete');
+      const runtimeStale = Boolean(status?.runtimeReady && status?.installedVersion && status?.version
+        && status.installedVersion !== status.version);
+      const serviceOnline = voiceData?.serviceOk ?? voiceData?.service?.ok ?? Boolean(snapshot?.services?.voice?.ok);
+      const externalOnline = Boolean(serviceOnline && !voiceData?.managed && !status?.runtimeReady);
       const missing = status ? [!status.models.hubert && 'HuBERT', !status.models.rmvpe && 'RMVPE',
         status.models.voices.length === 0 && '至少一种声线'].filter(Boolean) : [];
       return h('div', { style: { padding: 10, marginBottom: 10, border: `1px solid ${COLORS.border}`, borderRadius: 8, overflowWrap: 'anywhere' } },
@@ -361,15 +401,22 @@ window.__ModuleLoader__.load({
           '从国内源安装独立 Python 和 CPU 语音环境，无需访问 GitHub、手动装 Python 或使用命令行。需联网下载数百 MB，并预留约 3 GB 磁盘空间；CPU 推理速度取决于电脑性能。'),
         h('p', { className: 'dsc-row-hint', style: { margin: '6px 0' } },
           '不包含任何声线、HuBERT 或 RMVPE 模型；模型需自行下载。更新主插件会保留增强环境和模型。'),
+        externalOnline ? h('p', { style: { color: COLORS.success, margin: '6px 0' } },
+          '已检测到正在运行的本地语音服务，当前声线可以直接使用，不需要点下面的一键安装。一键安装只用于没有 Python/RVC 环境的机器，会另装一套独立 CPU 运行时。') : null,
         status && !status.supported ? h('p', null, '目前支持 Windows x64。') : null,
         status?.runtimeReady ? h('p', { style: { color: COLORS.success, margin: '6px 0' } },
           `环境已安装（${status.installedVersion}）${missing.length ? '；待补齐模型：' + missing.join('、') : '；模型已就绪，选择已有声线后可重启语音并试听'}`) : null,
+        runtimeStale ? h('p', { style: { color: COLORS.warn, margin: '6px 0' } },
+          `语音运行时 ${status.installedVersion} 较旧，当前插件需要 ${status.version}。点下方按钮更新后，情绪语调修复才会生效；已有模型会保留。`) : null,
         job && !staleJobMessage ? h('p', { role: 'status', style: { margin: '6px 0' } }, job.message,
           running && job.phase === 'downloading' ? `（${(job.downloaded / 1048576).toFixed(1)}${job.total ? ' / ' + (job.total / 1048576).toFixed(1) : ''} MB）` : '') : null,
         error ? h('p', { role: 'alert', style: { color: COLORS.error } }, error) : null,
         h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
-          h('button', { className: 'dsc-btn primary', disabled: busy || !status?.supported || running,
-            onClick: () => act('start', { confirmDownload: true }) }, status?.runtimeReady ? '重新安装增强环境' : '下载并安装语音增强（CPU）'),
+          h('button', { className: `dsc-btn${externalOnline ? '' : ' primary'}`, disabled: busy || !status?.supported || running,
+            onClick: () => act('start', { confirmDownload: true }) },
+            status?.runtimeReady
+              ? (runtimeStale ? `更新语音运行时（${status.version}）` : '重新安装增强环境')
+              : externalOnline ? '安装独立 CPU 语音环境（可选）' : '下载并安装语音增强（CPU）'),
           running ? h('button', { className: 'dsc-btn', disabled: busy || ['activating', 'complete'].includes(job.phase), onClick: () => act('cancel') }, '取消安装') : null,
           status?.runtimeReady ? h('button', { className: 'dsc-btn', disabled: busy, onClick: () => act('open-models') }, '打开模型目录') : null,
           status?.runtimeReady && !missing.length ? h('button', { className: 'dsc-btn', disabled: busy,
@@ -404,6 +451,8 @@ window.__ModuleLoader__.load({
       const [showLog, setShowLog] = useState(false);
       const [cleaning, setCleaning] = useState(false);
       const [subtitleBusy, setSubtitleBusy] = useState(false);
+      const [subtitleFonts, setSubtitleFonts] = useState({ fonts: [], loading: true, error: '', fallback: false });
+      const [fontBusy, setFontBusy] = useState(false);
       const [supportItems, setSupportItems] = useState([]);
       const [pbData, setPbData] = useState(null);
       const [pbError, setPbError] = useState('');
@@ -421,6 +470,28 @@ window.__ModuleLoader__.load({
           setWbStatus(`读取世界书失败：${error.message}`);
         }
       };
+
+      const loadSubtitleFonts = async ({ force = false } = {}) => {
+        setFontBusy(true);
+        setSubtitleFonts((previous) => ({ ...previous, loading: true, error: '' }));
+        try {
+          const data = await apiGet(`/subtitle/fonts${force ? '?force=1' : ''}`);
+          setSubtitleFonts({
+            fonts: Array.isArray(data.fonts) ? data.fonts : [],
+            loading: false,
+            error: data.error || '',
+            fallback: Boolean(data.fallback),
+          });
+        } catch (error) {
+          setSubtitleFonts({ fonts: [], loading: false, error: error.message, fallback: true });
+        } finally {
+          setFontBusy(false);
+        }
+      };
+
+      useEffect(() => {
+        void loadSubtitleFonts();
+      }, []);
 
       useEffect(() => {
         loadWorldbooks();
@@ -633,6 +704,38 @@ window.__ModuleLoader__.load({
         voiceOptions.push(h('option', { key: voice.id, value: voice.id }, `${voice.name || voice.id}${voice.installed ? '' : ''}`));
       }
 
+      const castRoles = Array.isArray(draft.cast?.roles) ? draft.cast.roles : [];
+      const mainCard = CAST_ROLE_CARDS.find((item) => item.id === draft.persona.style) ?? CAST_ROLE_CARDS[0];
+      const mainVoice = voiceList.find((voice) => String(voice.id) === String(draft.voice.voiceId));
+      const mainVoiceLabel = mainVoice?.name || draft.voice.voiceId || '当前声线';
+      const updateCastRole = (index, patch) => {
+        const next = castRoles.map((role, roleIndex) => (roleIndex === index ? { ...role, ...patch } : role));
+        set('cast.roles', next);
+      };
+      const castVoiceOptions = (role) => {
+        const options = [h('option', { key: 'inherit', value: '' }, '跟随主声线')];
+        const value = String(role.voiceId ?? '');
+        if (value && !voiceList.some((voice) => String(voice.id) === value)) {
+          options.push(h('option', { key: 'missing', value }, `当前声线不可用（${value}）`));
+        }
+        for (const voice of voiceList) {
+          options.push(h('option', { key: voice.id, value: voice.id }, voice.name || voice.id));
+        }
+        return options;
+      };
+
+      const subtitleFontList = Array.isArray(subtitleFonts.fonts) ? subtitleFonts.fonts : [];
+      const currentFont = String(draft.subtitle.fontFamily || 'Microsoft YaHei');
+      const subtitleFontOptions = [];
+      if (!subtitleFontList.includes(currentFont)) {
+        subtitleFontOptions.push(h('option', { key: 'current', value: currentFont }, `${currentFont}（当前）`));
+      }
+      for (const font of subtitleFontList) {
+        subtitleFontOptions.push(h('option', { key: font, value: font }, font));
+      }
+      const subtitleColorA = /^#[0-9a-f]{6}$/i.test(String(draft.subtitle.color ?? '')) ? draft.subtitle.color : '#eaf6ff';
+      const subtitleColorB = /^#[0-9a-f]{6}$/i.test(String(draft.subtitle.color2 ?? '')) ? draft.subtitle.color2 : subtitleColorA;
+
       return h(
         'div',
         { className: 'dsc-settings' },
@@ -712,7 +815,7 @@ window.__ModuleLoader__.load({
         h(
           Section,
           { title: '声音（TTS + RVC）', icon: ICONS.volume, defaultOpen: true },
-          h(VoiceInstallPanel, { notify, onVoiceRefresh: onRefreshVoices }),
+          h(VoiceInstallPanel, { notify, onVoiceRefresh: onRefreshVoices, voiceData, snapshot }),
           h(Toggle, { checked: draft.voice.enabled, onChange: (value) => set('voice.enabled', value), label: '开启语音朗读（关掉只出文字）' }),
           h(Toggle, { checked: draft.voice.emotionEnabled, onChange: (value) => set('voice.emotionEnabled', value), label: '情绪化语调（按台词情绪调整语气，避免捧读）' }),
           h(Row, { label: '语音后端', hint: '自动：优先用本地 RVC 语音服务，服务不在就用 Windows 系统语音（离线）。' },
@@ -766,11 +869,78 @@ window.__ModuleLoader__.load({
           Section,
           { title: '字幕（桌面悬浮）', icon: ICONS.volume },
           h('div', { className: 'dsc-row-hint', style: { margin: '0 0 4px' } },
-            '把陪玩说的话像音乐软件歌词一样显示在桌面最上层；字幕窗口可以按住拖动到任意位置，位置会记住。独占全屏游戏里可能盖不上去。'),
+            '把陪玩说的话像音乐软件歌词一样显示在桌面最上层；开启鼠标穿透后不会挡住游戏鼠标，按住 Ctrl 可临时拖动调整位置，位置会记住。独占全屏游戏里可能盖不上去。'),
           h(Toggle, { checked: draft.subtitle.enabled, onChange: (value) => set('subtitle.enabled', value), label: '开启桌面字幕' }),
+          h(Toggle, {
+            checked: draft.subtitle.clickThrough !== false,
+            onChange: (value) => set('subtitle.clickThrough', value),
+            label: '鼠标穿透（推荐；按住 Ctrl 可拖动字幕）',
+          }),
           h(Row, { label: '字号 / 字体' },
             h('input', { className: 'dsc-number', type: 'number', min: 12, max: 96, value: draft.subtitle.fontSize ?? 28, onChange: (e) => set('subtitle.fontSize', Number(e.target.value)) }),
-            h('input', { className: 'dsc-text', value: draft.subtitle.fontFamily ?? 'Microsoft YaHei', placeholder: 'Microsoft YaHei / 思源黑体 / Consolas', onChange: (e) => set('subtitle.fontFamily', e.target.value) }),
+            h('select', {
+              className: 'dsc-select',
+              value: currentFont,
+              onChange: (e) => set('subtitle.fontFamily', e.target.value),
+            }, subtitleFontOptions),
+            h('button', {
+              className: 'dsc-btn ghost',
+              disabled: fontBusy || subtitleFonts.loading,
+              onClick: () => void loadSubtitleFonts({ force: true }),
+            }, fontBusy || subtitleFonts.loading ? '读取中…' : '刷新字体'),
+          ),
+          h('div', { className: 'dsc-row-hint', style: { margin: '0 0 2px' } },
+            subtitleFonts.loading
+              ? '正在读取本机字体…'
+              : subtitleFonts.error
+                ? `字体列表读取失败，已显示兜底字体：${subtitleFonts.error}`
+                : `已读取 ${subtitleFontList.length} 个本机字体${subtitleFonts.fallback ? '（兜底列表）' : ''}。`),
+          h(Row, {
+            label: '字幕延时（秒）',
+            hint: '语音合成客观存在延迟，不同电脑配置延迟不同，延时字幕出现以配合语音出现时机。0 = 自动等语音真正开始（推荐）；大于 0 = 从台词生成后固定等待这么多秒再显示，用于手动校准。多人模式会逐句自动对齐。',
+          },
+            h('input', {
+              className: 'dsc-number',
+              type: 'number',
+              min: 0,
+              max: 10,
+              step: 0.1,
+              value: draft.subtitle.delaySec ?? 0,
+              onChange: (e) => set('subtitle.delaySec', Number(e.target.value)),
+            }),
+            h('span', { className: 'dsc-sub' }, '秒'),
+          ),
+          h(Row, { label: '双色字幕', hint: '类似桌面歌词的双色渐变；默认蓝白。选两个颜色即可，字幕会从左到右渐变。' },
+            h('input', {
+              className: 'dsc-color',
+              type: 'color',
+              value: subtitleColorA,
+              onChange: (e) => set('subtitle.color', e.target.value),
+              title: '第一种颜色',
+            }),
+            h('input', {
+              className: 'dsc-color',
+              type: 'color',
+              value: subtitleColorB,
+              onChange: (e) => set('subtitle.color2', e.target.value),
+              title: '第二种颜色',
+            }),
+            h('span', {
+              className: 'dsc-gradient-preview',
+              style: { background: `linear-gradient(90deg, ${subtitleColorA}, ${subtitleColorB})` },
+              title: '渐变预览',
+            }),
+          ),
+          h('div', { className: 'dsc-flex', style: { gap: 6 } },
+            h('span', { className: 'dsc-sub' }, '配色预设：'),
+            SUBTITLE_PALETTES.map((palette) => h('button', {
+              key: palette.id,
+              className: 'dsc-palette',
+              onClick: () => {
+                set('subtitle.color', palette.color);
+                set('subtitle.color2', palette.color2);
+              },
+            }, palette.name)),
           ),
           h(Row, { label: '停留秒数 / 背景不透明度' },
             h('input', { className: 'dsc-number', type: 'number', min: 2, max: 60, value: draft.subtitle.displaySec ?? 8, onChange: (e) => set('subtitle.displaySec', Number(e.target.value)) }),
@@ -826,8 +996,6 @@ window.__ModuleLoader__.load({
               h('option', { value: 'analyst' }, '冷静分析'),
             ),
           ),
-          h(Toggle, { checked: draft.talk.cheerMode, onChange: (value) => set('talk.cheerMode', value), label: '喝彩模式（少说教、多夸击杀/爆炸/开火等高光操作，不盯着弹药和任务目标）' }),
-          h(Toggle, { checked: draft.talk.banQuestions, onChange: (value) => set('talk.banQuestions', value), label: '观察时少提问（玩家没空回答问句；命中会改成陈述/感叹）' }),
           h(Row, { label: '关系身份', hint: '「你是用户的___，坐在旁边一起看 TA 玩游戏」里的那个词。' },
             h('input', { className: 'dsc-text', value: draft.persona.relation, onChange: (e) => set('persona.relation', e.target.value), placeholder: '损友 / 朋友 / 搭档 / 青梅' }),
           ),
@@ -845,6 +1013,108 @@ window.__ModuleLoader__.load({
               onChange: (e) => set('persona.extra', e.target.value),
             }),
           ),
+          h(Toggle, {
+            checked: draft.cast?.enabled === true,
+            onChange: (value) => set('cast.enabled', value),
+            label: '一人分饰多角（多人陪玩，实验）',
+          }),
+          h('div', { className: 'dsc-row-hint', style: { margin: '0 0 2px' } },
+            '开启后，上方「人格」配置就是角色 1（主角色），下面只额外加入角色 2、3。每名角色有自己的开口概率，每轮独立掷骰，至少保底一个角色说话；接话顺序可随机。角色越多 TTS/RVC 队列越长，越容易卡顿；建议先开 2 个，最多 3 个。面板聊天由角色 1 回答。多人声线需要 RVC 语音服务；系统语音下所有角色会用同一个声音。'),
+          draft.cast?.enabled
+            ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+                h('div', { className: 'dsc-cast-card' },
+                  h('div', { className: 'dsc-cast-head' },
+                    '角色 1（主角色）',
+                    h('span', { className: 'dsc-spacer' }),
+                    h('span', { className: 'dsc-badge on' }, '沿用上方配置'),
+                  ),
+                  h('div', { className: 'dsc-row-hint', style: { margin: 0 } },
+                    `名字：${draft.persona.name || '陪玩'}｜风格：${mainCard.name}｜声线：${mainVoiceLabel}｜AGENTS.md：${draft.persona.useAgentsMd ? '沿用' : '不沿用'}`),
+                  h(Row, { label: '开口概率' },
+                    h('input', {
+                      className: 'dsc-number',
+                      type: 'number',
+                      min: 0,
+                      max: 100,
+                      step: 5,
+                      value: draft.cast.mainChance ?? 70,
+                      onChange: (e) => set('cast.mainChance', Number(e.target.value)),
+                    }),
+                    h('span', { className: 'dsc-sub' }, '%'),
+                  ),
+                ),
+                h(Toggle, {
+                  checked: draft.cast.randomOrder !== false,
+                  onChange: (value) => set('cast.randomOrder', value),
+                  label: '随机接话顺序',
+                }),
+                castRoles.slice(1).map((role, relativeIndex) => {
+                  const index = relativeIndex + 1;
+                  const card = CAST_ROLE_CARDS.find((item) => item.id === role.card) ?? CAST_ROLE_CARDS[0];
+                  return h('div', { key: role.id ?? index, className: 'dsc-cast-card' },
+                    h('div', { className: 'dsc-cast-head' },
+                      `额外角色 ${index + 1}`,
+                      h('span', { className: 'dsc-spacer' }),
+                      Toggle({
+                        checked: role.enabled === true,
+                        onChange: (value) => updateCastRole(index, { enabled: value }),
+                        label: '启用',
+                      }),
+                    ),
+                    h(Row, { label: '名字' },
+                      h('input', {
+                        className: 'dsc-text',
+                        value: role.name ?? '',
+                        placeholder: card.name,
+                        onChange: (e) => updateCastRole(index, { name: e.target.value }),
+                      }),
+                    ),
+                    h(Row, { label: '角色卡' },
+                      h('select', {
+                        className: 'dsc-select',
+                        value: card.id,
+                        onChange: (e) => updateCastRole(index, { card: e.target.value }),
+                      }, CAST_ROLE_CARDS.map((item) => h('option', { key: item.id, value: item.id }, item.name))),
+                    ),
+                    h('div', { className: 'dsc-row-hint', style: { margin: '0 0 0 120px' } }, card.blurb),
+                    h(Row, { label: '声线' },
+                      h('select', {
+                        className: 'dsc-select',
+                        value: role.voiceId ?? '',
+                        onChange: (e) => updateCastRole(index, { voiceId: e.target.value }),
+                      }, castVoiceOptions(role)),
+                    ),
+                    h(Row, { label: '开口概率' },
+                      h('input', {
+                        className: 'dsc-number',
+                        type: 'number',
+                        min: 0,
+                        max: 100,
+                        step: 5,
+                        value: role.speakChance ?? 70,
+                        onChange: (e) => updateCastRole(index, { speakChance: Number(e.target.value) }),
+                      }),
+                      h('span', { className: 'dsc-sub' }, '%'),
+                    ),
+                    Toggle({
+                      checked: role.useAgentsMd === true,
+                      onChange: (value) => updateCastRole(index, { useAgentsMd: value }),
+                      label: '这个角色沿用 AGENTS.md',
+                    }),
+                    h(Row, { label: '额外人设' },
+                      h('input', {
+                        className: 'dsc-text',
+                        value: role.extra ?? '',
+                        placeholder: '可选：口癖 / 称呼 / 禁忌',
+                        onChange: (e) => updateCastRole(index, { extra: e.target.value }),
+                      }),
+                    ),
+                  );
+                }),
+              )
+            : null,
+          h(Toggle, { checked: draft.talk.cheerMode, onChange: (value) => set('talk.cheerMode', value), label: '喝彩模式（少说教、多夸击杀/爆炸/开火等高光操作，不盯着弹药和任务目标）' }),
+          h(Toggle, { checked: draft.talk.banQuestions, onChange: (value) => set('talk.banQuestions', value), label: '观察时少提问（玩家没空回答问句；命中会改成陈述/感叹）' }),
         ),
         h(
           Section,

@@ -26,9 +26,19 @@ const ctx = {
     listProviders: () => ['mock'],
     listModels: async () => [{ id: 'mock', inputModalities: ['text', 'image'] }],
     async *stream(options) {
-      const vision = options.messages[0].content.some((x) => x.type === 'image');
+      const content = options.messages[0].content;
+      const vision = content.some((x) => x.type === 'image');
+      const promptText = content
+        .filter((x) => x.type === 'text')
+        .map((x) => x.text ?? '')
+        .join('\n');
       calls.push({ kind: vision ? 'vision' : 'talk', at: Date.now() });
-      yield { type: 'text-delta', index: 0, text: vision ? '{"game":"RimWorld","scene":"建造","state":"木墙","notable":"木材"}' : '【情绪：开心】这座木墙建得很整齐。' };
+      const text = vision
+        ? '{"game":"RimWorld","scene":"建造","state":"木墙","notable":"木材"}'
+        : promptText.includes('【剧团输出格式')
+          ? '{"lines":[{"role":"r1","emotion":"开心","text":"这座木墙建得很整齐。"},{"role":"r2","emotion":"吐槽","text":"整齐是整齐，就是有点像牢房。"}]}'
+          : '【情绪：开心】这座木墙建得很整齐。';
+      yield { type: 'text-delta', index: 0, text };
       yield { type: 'usage', usage: { inputTokens: vision ? 100 : 200, outputTokens: vision ? 11 : 23 } };
     },
   },
@@ -48,7 +58,7 @@ async function engine(extra = {}) {
   result.CAPTURE.health = async () => ({ ok: true });
   result.VOICE.health = async () => ({ ok: true });
   result.VOICE.stop = async () => ({ ok: true });
-  result.VOICE.speak = async (text) => { speaks.push(text); return { ok: true, backend: 'mock' }; };
+  result.VOICE.speak = async (text, meta) => { speaks.push({ text, meta }); return { ok: true, backend: 'mock' }; };
   result.CAPTURE.grab = async ({ tickId }) => {
     const dir = path.join(FRAMES_DIR, String(tickId));
     await mkdir(dir, { recursive: true });
@@ -143,6 +153,37 @@ if (mode === 'pause') {
   assert.equal(e.getState().stats.tokensIn, 300);
   assert.equal(e.getState().stats.llmCalls, 2);
   emit({ tokensIn: e.getState().stats.tokensIn, tokensOut: e.getState().stats.tokensOut, llmCalls: e.getState().stats.llmCalls });
+  await e.dispose();
+} else if (mode === 'cast') {
+  const e = await engine({
+    enabled: true,
+    persona: { name: '阿岚', style: 'cheerful', useAgentsMd: false },
+    voice: { voiceId: 'v1' },
+    cast: {
+      enabled: true,
+      mainChance: 100,
+      randomOrder: false,
+      roles: [
+        { enabled: true, card: 'cheerful', name: '阿岚（旧槽位，不再使用）', voiceId: 'ignored', useAgentsMd: false },
+        { enabled: true, card: 'tsundere', name: '小满', voiceId: 'v2', useAgentsMd: false, speakChance: 100 },
+        { enabled: false, card: 'analyst', name: '军师', voiceId: 'v3', useAgentsMd: false },
+      ],
+    },
+  });
+  const result = await e.captureNow();
+  assert.equal(result.ok, true);
+  assert.equal(result.lines?.length, 2, '主角色 + 额外角色各有一条台词');
+  assert.equal(speaks.length, 2, '每个角色各朗读一次');
+  assert.equal(speaks[0].meta.voiceId, 'v1');
+  assert.equal(speaks[1].meta.voiceId, 'v2');
+  assert.equal(speaks[0].text, '这座木墙建得很整齐。');
+  const entry = e.getState().history.at(-1);
+  assert.equal(entry.castLines?.length, 2);
+  assert.match(entry.text, /阿岚：/);
+  const chat = await e.chat('这墙怎么样');
+  assert.equal(chat.speaker, '阿岚', '面板聊天由主角色回答');
+  assert.equal(speaks.at(-1).meta.voiceId, 'v1', '聊天也应使用主角色声线');
+  emit({ lines: result.lines.map((line) => `${line.name}/${line.voiceId}`), speaks: speaks.map((item) => item.meta.voiceId), chatSpeaker: chat.speaker });
   await e.dispose();
 } else if (mode === 'chat-mute') {
   const e = await engine({ voice: { speakReplies: false } });

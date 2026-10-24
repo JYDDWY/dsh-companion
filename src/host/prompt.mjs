@@ -9,6 +9,7 @@
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { homedir } from 'node:os';
+import { roleCard } from './cast.mjs';
 
 /** 读 AGENTS.md 人物设定（带 mtime 缓存）。 */
 export function makePersonaLoader() {
@@ -137,6 +138,70 @@ export function resolvePromptBlock(config, id) {
   const override = String(config?.persona?.promptOverrides?.[id] ?? '').trim();
   if (override) return override;
   return promptBlockDefaults(config)[id] ?? '';
+}
+
+/** 某个角色卡对应的默认说话规则（不受全局 style 覆盖影响）。 */
+function roleStyleRules(role) {
+  const card = roleCard(role?.card);
+  return promptBlockDefaults({ persona: { style: card.style } }).style;
+}
+
+/**
+ * 多人剧团的系统提示词：一次定义所有角色，但把 AGENTS.md 本体人格明确限定给
+ * 勾了「沿用」的角色，避免所有角色串成同一个口吻。
+ */
+export function buildCastSystemPrompt(config, agentsText, roles, scene) {
+  const list = Array.isArray(roles) ? roles.filter((role) => role?.id) : [];
+  const kind = typeof scene === 'string' ? 'game' : scene?.kind ?? 'game';
+  const sceneName = typeof scene === 'string' ? scene : scene?.label || '';
+  const lines = [];
+  lines.push('你现在同时扮演一个「陪玩小剧团」里的多个角色。每次只输出其中几位角色的台词，');
+  lines.push('但每个角色都必须保持自己的声线、人格、称呼和说话方式，角色之间不能串味。');
+  lines.push('');
+  lines.push('【角色表】');
+  for (const role of list) {
+    const card = roleCard(role.card);
+    const relation = String(role.relation || card.relation).trim();
+    lines.push(`- ${role.id}｜${role.name}｜角色卡：${card.name}｜关系：${relation}`);
+    lines.push(`  人设：${card.blurb}`);
+    if (role.main) lines.push('  备注：这是主角色，沿用设置页上方的人格配置和当前声线。');
+    const styleLines = roleStyleRules(role).split('\n').filter(Boolean);
+    for (const line of styleLines) {
+      // 角色卡里每一条都是该角色自己的规则，保留「-」层级。
+      lines.push(`  ${line}`);
+    }
+    const extra = String(role.extra ?? '').trim();
+    if (extra) lines.push(`  额外设定：${extra}`);
+    lines.push(`  继承 DSH 本体人格：${role.useAgentsMd ? '是' : '否'}`);
+  }
+  const inheritors = list.filter((role) => role.useAgentsMd);
+  if (inheritors.length > 0) {
+    lines.push('');
+    lines.push(`【本体人格（只适用于以下角色：${inheritors.map((role) => role.name).join('、')}）】`);
+    if (agentsText) {
+      lines.push('下面这份人格设定只给上面这些角色继承；其他角色不得使用它的口吻、称呼和自称。');
+      lines.push(agentsText.trim());
+    } else {
+      lines.push('（没有读到 AGENTS.md；这些角色只使用角色卡和额外设定。）');
+    }
+  }
+  lines.push('');
+  lines.push('【陪伴场景】');
+  lines.push(`${SCENE_ROLE[kind] ?? SCENE_ROLE.game}${sceneName ? `（${sceneName}）` : ''}。`);
+  lines.push('');
+  lines.push('【共同规则】');
+  lines.push('所有角色都要遵守下面的规则；每一条都是硬要求：');
+  lines.push(...resolvePromptBlock(config, 'honesty').split('\n'));
+  lines.push(...resolvePromptBlock(config, 'questions').split('\n'));
+  lines.push(...resolvePromptBlock(config, 'filler').split('\n'));
+  lines.push('');
+  lines.push('【剧团规则】');
+  lines.push('- 每个角色只用自己的口吻说话，不要替别的角色说话，也不要在台词里写角色名。');
+  lines.push('- 角色之间可以接梗、吐槽、拆台、互相补一句；像真的坐在一起看屏幕，不要轮流念稿。');
+  lines.push('- 如果某个角色这一轮没什么可说，也让它用自己的方式短促地接一句，不要空着。');
+  lines.push('- 不要所有角色都夸同一件事，也不要三个人用同一种句式。');
+  lines.push('- 台词会逐句念出来，所以必须是能直接读的自然口语；不要表情符号、括号动作、markdown、列表。');
+  return lines.join('\n');
 }
 
 /**
@@ -353,10 +418,13 @@ export function buildTalkPrompt({
   isReply,
   userMessage,
   replyContext,
+  cast,
 }) {
   const lines = [];
   if (isReply) {
     lines.push('主人开口跟你说话了。结合你们刚才聊的内容和屏幕上正在发生的事，自然接话。');
+  } else if (Array.isArray(cast) && cast.length > 0) {
+    lines.push('你刚看了一眼主人现在的屏幕。这一轮由剧团里的几位角色一起接话，像真的坐在一起看屏幕。');
   } else {
     lines.push('你刚看了一眼主人现在的屏幕。现在说一句你此刻想说的话。');
   }
@@ -438,16 +506,30 @@ export function buildTalkPrompt({
   lines.push('');
   lines.push(...sceneTalkRules(kind, cheerMode, config));
   lines.push('');
-  lines.push('【输出格式（严格）】');
-  lines.push('第一行只写情绪标签，从下面选一个（原样用中文；当前是温柔风格的话，优先用 温柔/开心/认真/惊讶/无奈/平静，吐槽和坏笑只能是善意玩笑）：');
-  lines.push('  【情绪：开心】【情绪：兴奋】【情绪：吐槽】【情绪：认真】【情绪：温柔】【情绪：惊讶】【情绪：坏笑】【情绪：无奈】【情绪：平静】');
-  lines.push('第二行写你要说的那一两句台词。不要输出其它任何东西。');
-  lines.push('');
-  lines.push('自检：① 是不是在念屏幕？是就重写。② 换成别的场景还成立吗？成立就重写（太笼统）。');
-  lines.push('③ 能直接读出来吗（没有表情符号/括号动作/markdown/引号）？不能就重写。④ 是不是太长？压到 60 字以内。');
-  lines.push('⑤ 这句话里有没有一个「只属于当前屏幕」的具体信息（名字/数字/动作/台词）？没有就是废话，重写。');
-  lines.push('⑥ 把这句话搬到别的游戏/别的剧里还成立吗？成立就是废话，重写。');
-  lines.push('⑦ 是不是又在提问？观察型台词尽量别用问句，改成陈述句/感叹句；反问和追问收尾也不行。');
+  if (Array.isArray(cast) && cast.length > 0) {
+    lines.push('【剧团输出格式（严格）】');
+    lines.push('只输出一个 JSON 对象，不要 markdown 代码块，不要解释，不要前后缀：');
+    lines.push('{"lines":[{"role":"r1","emotion":"开心","text":"..."}]}');
+    lines.push(`本轮开口角色（按此顺序）：${cast.map((role) => `${role.id}（${role.name}）`).join(' → ')}`);
+    lines.push(`规则：`);
+    lines.push(`- 只让上面这些角色开口，每个角色各说 1 句，共 ${cast.length} 句；不要加入未列出的角色。`);
+    lines.push('- 每条台词 8～40 个汉字，能直接照着读；不要写角色名、括号动作、表情符号、markdown。');
+    lines.push('- 按上面列出的顺序排列；后一个角色可以回应前一个角色，但不要复述同一句。');
+    lines.push('- role 必须用上面的角色 id（r1/r2/r3），不要写名字。');
+    lines.push('- emotion 从：开心 / 兴奋 / 吐槽 / 认真 / 温柔 / 惊讶 / 坏笑 / 无奈 / 平静 里选一个。');
+    lines.push('- 角色之间要有区别：不要让所有人用同一种语气，也不要所有人都夸同一个点。');
+  } else {
+    lines.push('【输出格式（严格）】');
+    lines.push('第一行只写情绪标签，从下面选一个（原样用中文；当前是温柔风格的话，优先用 温柔/开心/认真/惊讶/无奈/平静，吐槽和坏笑只能是善意玩笑）：');
+    lines.push('  【情绪：开心】【情绪：兴奋】【情绪：吐槽】【情绪：认真】【情绪：温柔】【情绪：惊讶】【情绪：坏笑】【情绪：无奈】【情绪：平静】');
+    lines.push('第二行写你要说的那一两句台词。不要输出其它任何东西。');
+    lines.push('');
+    lines.push('自检：① 是不是在念屏幕？是就重写。② 换成别的场景还成立吗？成立就重写（太笼统）。');
+    lines.push('③ 能直接读出来吗（没有表情符号/括号动作/markdown/引号）？不能就重写。④ 是不是太长？压到 60 字以内。');
+    lines.push('⑤ 这句话里有没有一个「只属于当前屏幕」的具体信息（名字/数字/动作/台词）？没有就是废话，重写。');
+    lines.push('⑥ 把这句话搬到别的游戏/别的剧里还成立吗？成立就是废话，重写。');
+    lines.push('⑦ 是不是又在提问？观察型台词尽量别用问句，改成陈述句/感叹句；反问和追问收尾也不行。');
+  }
   return lines.join('\n');
 }
 

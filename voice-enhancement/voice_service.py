@@ -20,13 +20,16 @@
 ``emotion`` 可选：neutral（缺省，旧行为）| happy | excited | tsukkomi | serious |
 gentle | surprised | smug | sigh；未知值按 neutral 处理。实现见 emotion_prosody.py。
 
-启动（必须用 RVC 的 .venv Python，因为 sounddevice/torch 都在里面）：
+启动（必须用带 sounddevice/torch 的 Python；插件的一键安装会准备好独立环境）：
 
-    E:\\codx_workspace\\gpt-voice-playground\\.venv\\Scripts\\python.exe
-        E:\\dsh陪玩\\voice-service\\voice_service.py
+    python voice_service.py --port 9123 --host 127.0.0.1
 
-edge-tts 装在 voice-service/pydeps 里，脚本会自动把它加入 sys.path，
-也可以手动设 PYTHONPATH=E:\\dsh陪玩\\voice-service\\pydeps。
+手动部署时可用环境变量指定 RVC 工程与解释器：
+
+    RVC_HOME=<RVC 工程目录> RVC_PYTHON=<带 torch 的 python.exe> python voice_service.py
+
+edge-tts 装在服务目录下的 pydeps 里，脚本会自动把它加入 sys.path；
+也可以手动把该目录加入 PYTHONPATH。
 
 只读引用 RVC 工程：不修改、不依赖其运行状态；RVC 的 `infer/` 模块以
 import 方式复用（Pipeline / VC / hubert / rmvpe），模型只在 worker 里加载一次。
@@ -291,6 +294,8 @@ class TtsError(RuntimeError):
 
 _EMOTION_RETRY_DELAYS = (0.6, 1.5)  # 分句请求失败后的重试间隔（秒）
 _EMOTION_CLAUSE_TIMEOUT = 45.0
+_EMOTION_FADE_MS = 12
+_EMOTION_PAUSE_LEVEL = 0.0012  # ≈ -58 dBFS，避免分句之间是刺耳的数字静音
 
 
 def _trim_silence(data, sr: int, margin_ms: int = 8):
@@ -312,15 +317,53 @@ def _trim_silence(data, sr: int, margin_ms: int = 8):
     return data[start:end]
 
 
+def _fade_edges(data, sr: int, fade_ms: int = _EMOTION_FADE_MS):
+    """给分句首尾做短淡入淡出，避免硬拼时出现咔哒/爆音。"""
+    import numpy as np
+
+    if len(data) == 0:
+        return data
+    n = min(int(sr * fade_ms / 1000), len(data) // 4)
+    if n <= 1:
+        return data
+    out = np.asarray(data, dtype=np.float32).copy()
+    ramp = np.linspace(0.0, 1.0, n, dtype=np.float32)
+    out[:n] *= ramp
+    out[-n:] *= ramp[::-1]
+    return out
+
+
+def _low_level_pause(samples: int, level: float = _EMOTION_PAUSE_LEVEL):
+    """分句间停顿：用低电平底噪代替纯零，再淡入淡出；贴近自然气口。"""
+    import numpy as np
+
+    if samples <= 0:
+        return np.zeros(0, dtype=np.float32)
+    rng = np.random.default_rng(20261023)
+    pad = (rng.standard_normal(samples) * level).astype(np.float32)
+    n = min(int(samples // 4), max(1, int(samples * 0.02)))
+    if n > 0:
+        ramp = np.linspace(0.0, 1.0, n, dtype=np.float32)
+        pad[:n] *= ramp
+        pad[-n:] *= ramp[::-1]
+    return pad
+
+
 def append_tail_silence(wav_path, ms: int) -> float:
-    """在 wav 末尾补 ms 毫秒静音（句间停顿），返回新的时长（秒）。"""
+    """在 wav 末尾补 ms 毫秒低电平停顿（句间停顿），返回新的时长（秒）。"""
     import numpy as np
 
     if ms <= 0:
         data, sr = read_wav_mono(wav_path)
         return round(len(data) / sr, 3) if sr else 0.0
     data, sr = read_wav_mono(wav_path)
-    pad = np.zeros(int(round(sr * ms / 1000.0)), dtype=np.float32)
+    # 只淡出句尾，别削掉句首辅音；随后接低电平底噪。
+    if len(data) > 8:
+        n = min(int(sr * 8 / 1000), len(data) // 4)
+        if n > 1:
+            data = np.asarray(data, dtype=np.float32).copy()
+            data[-n:] *= np.linspace(0.0, 1.0, n, dtype=np.float32)[::-1]
+    pad = _low_level_pause(int(round(sr * ms / 1000.0)))
     out = np.concatenate([data, pad]) if len(data) else pad
     write_wav(wav_path, out, sr)
     return round(len(out) / sr, 3)
@@ -580,12 +623,10 @@ class TtsEngine:
                     raise TtsError(f"分句 {i} 音频为空")
                 if sr != TTS_SR:
                     data = resample(data, sr, TTS_SR)
-                pieces.append(_trim_silence(data, TTS_SR))
+                pieces.append(_fade_edges(_trim_silence(data, TTS_SR), TTS_SR))
                 pause = int(seg.get("pauseAfterMs") or 0)
                 if pause > 0 and i < len(segments) - 1:
-                    pieces.append(
-                        np.zeros(int(round(TTS_SR * pause / 1000.0)), dtype=np.float32)
-                    )
+                    pieces.append(_low_level_pause(int(round(TTS_SR * pause / 1000.0))))
             audio = np.concatenate(pieces) if pieces else np.zeros(0, dtype=np.float32)
             if len(audio) == 0:
                 raise TtsError("情绪拼接后音频为空")
@@ -2317,9 +2358,10 @@ class VoiceService:
         sentence.sample_rate = rvc_res.get("sampleRate")
         # 非 neutral：在 RVC 之后的成品音频末尾补「句间停顿」，让句与句的节奏也带情绪
         plan = ep.resolve_emotion(job.emotion)
-        if plan.id != "neutral" and plan.tail_pause_ms > 0:
+        tail_pause_ms = max(0, min(200, int(plan.tail_pause_ms)))
+        if plan.id != "neutral" and tail_pause_ms > 0:
             try:
-                new_duration = append_tail_silence(rvc_path, plan.tail_pause_ms)
+                new_duration = append_tail_silence(rvc_path, tail_pause_ms)
                 if new_duration:
                     sentence.duration = new_duration
             except Exception as exc:  # 补静音失败不影响播放

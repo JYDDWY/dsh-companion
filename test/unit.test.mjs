@@ -1,8 +1,9 @@
 import { DEFAULTS, normalizeConfig, mergeConfig, mergeUserConfig, pickKnownKeys } from '../src/host/config.mjs';
 import { identifyGame, classifyGenre, memoryWindowSec, identifyScene, isWatching, isCoding, scenarioLabel, sceneIntervalSec, sceneMemoryWindowSec } from '../src/host/games.mjs';
-import { buildSystemPrompt, buildTalkPrompt, formatHistory, VISION_PROMPT, PROMPT_BLOCK_META, promptBlockDefaults, resolvePromptBlock } from '../src/host/prompt.mjs';
+import { buildSystemPrompt, buildTalkPrompt, buildCastSystemPrompt, formatHistory, VISION_PROMPT, PROMPT_BLOCK_META, promptBlockDefaults, resolvePromptBlock } from '../src/host/prompt.mjs';
 import { normalizeWorldbook, worldbookId, legacyWorldbookId, isWorldbookId, getWorldbookById, deleteWorldbook, worldbookPromptText } from '../src/host/worldbook.mjs';
-import { sanitizeSpeech, parseVisionJson, sanitizeVisionText, stripModelNoise, splitEmotion, EMOTIONS, extractJsonObject, isGenericFiller, isGroundlessStillness, isNagging, mentionsHudFocus } from '../src/host/llm.mjs';
+import { sanitizeSpeech, parseVisionJson, sanitizeVisionText, stripModelNoise, splitEmotion, parseCastScript, EMOTIONS, extractJsonObject, isGenericFiller, isGroundlessStillness, isNagging, mentionsHudFocus } from '../src/host/llm.mjs';
+import { normalizeCast, activeCastRoles, chooseCastSpeakers, withRolePersona, roleCard } from '../src/host/cast.mjs';
 
 let pass = 0, fail = 0;
 const ok = (cond, name) => { if (cond) { pass++; } else { fail++; console.log('FAIL:', name); } };
@@ -183,6 +184,65 @@ ok(isWorldbookId('a1b2c3d4e5f6') && !isWorldbookId('../config') && !isWorldbookI
 ok((await getWorldbookById('../../config')) === null, 'R03 traversal read rejected');
 ok((await deleteWorldbook('../outside-worldbooks')) === false, 'R03 traversal delete rejected');
 ok(normalizeWorldbook({ game: 'Test Game', id: '../../evil' }).id === worldbookId('Test Game'), 'R03 model id ignored on create');
+
+// ── 字幕延时 / 双色 / 多人角色 ─────────────────────────────────
+const subtitleCfg = normalizeConfig({ subtitle: { delaySec: 99, color: 'bad', color2: '#123456' } });
+ok(subtitleCfg.subtitle.delaySec === 10, 'subtitle delay clamps to 0-10s');
+ok(subtitleCfg.subtitle.color === '#eaf6ff' && subtitleCfg.subtitle.color2 === '#123456', 'subtitle colors normalized');
+const subtitleFallback = normalizeConfig({ subtitle: { color: '#112233', color2: 'nope' } });
+ok(subtitleFallback.subtitle.color2 === '#112233', 'invalid color2 falls back to color');
+ok(DEFAULTS.subtitle.color === '#eaf6ff' && DEFAULTS.subtitle.color2 === '#4da3ff', 'blue-white subtitle default');
+ok(DEFAULTS.subtitle.clickThrough === true && normalizeConfig({ subtitle: { clickThrough: false } }).subtitle.clickThrough === false, 'subtitle click-through default + toggle');
+
+const castDefaults = normalizeConfig({});
+ok(castDefaults.cast.enabled === false && castDefaults.cast.roles.length === 3, 'cast defaults: off + 3 slots');
+ok(castDefaults.cast.roles[0].enabled && castDefaults.cast.roles[1].enabled && !castDefaults.cast.roles[2].enabled, 'cast default role enablement');
+ok(castDefaults.cast.mainChance === 70 && castDefaults.cast.roles[0].speakChance === 70 && castDefaults.cast.randomOrder === true, 'cast default per-role chance/order');
+const castOn = normalizeConfig({
+  persona: {
+    name: '阿岚', style: 'cheerful', relation: '搭档', useAgentsMd: true, extra: '主角色人设',
+    promptOverrides: { style: '主角色自定义风格' },
+  },
+  voice: { voiceId: 'march7' },
+  cast: {
+    enabled: true,
+    mainChance: 100,
+    randomOrder: false,
+    roles: [
+      { enabled: true, card: 'cheerful', name: '阿岚（这条不再使用）', voiceId: 'ignored', useAgentsMd: true },
+      { enabled: true, card: 'tsundere', name: '小满', speakChance: 30 },
+    ],
+  },
+});
+ok(castOn.cast.roles.length === 3 && castOn.cast.roles[1].name === '小满', 'cast roles preserve names');
+ok(castOn.cast.roles[2].enabled === false, 'missing third role stays disabled');
+const castActive = activeCastRoles(castOn);
+ok(castActive.length === 2 && castActive[0].main === true && castActive[0].name === '阿岚' && castActive[1].card === 'tsundere', 'activeCastRoles = main persona + extras');
+ok(castActive[0].speakChance === 100 && castActive[1].speakChance === 30, 'each role keeps its own speak chance');
+const castPersona = withRolePersona(castOn, castActive[0]);
+ok(castPersona.persona.name === '阿岚' && castPersona.persona.style === 'cheerful' && castPersona.persona.useAgentsMd === true, 'main role reuses global persona');
+ok(castPersona.persona.promptOverrides.style === '主角色自定义风格', 'main role keeps global style override');
+const extraPersona = withRolePersona(castOn, castActive[1]);
+ok(extraPersona.persona.name === '小满' && extraPersona.persona.promptOverrides.style === undefined, 'extra role uses role card and drops style override');
+ok(roleCard('tsundere').name === '损友吐槽', 'role card lookup');
+const castSystem = buildCastSystemPrompt(castOn, '本体人格文本', castActive, { kind: 'game', label: 'RimWorld' });
+ok(castSystem.includes('角色表') && castSystem.includes('阿岚') && castSystem.includes('本体人格文本'), 'cast system includes roles + agents');
+ok(castSystem.includes('只适用于以下角色：阿岚') && castSystem.includes('其他角色不得使用它的口吻'), 'agents scope is limited to selected roles');
+const castTalk = buildTalkPrompt({ kind: 'game', game: 'RimWorld', cast: castActive, historyText: '', windowSec: 150, genre: 'long', config: castOn });
+ok(castTalk.includes('剧团输出格式') && castTalk.includes('"role":"r1"') && castTalk.includes('每个角色各说 1 句'), 'cast talk prompt demands JSON script');
+const castParsed = parseCastScript('{"lines":[{"role":"r1","emotion":"开心","text":"阿岚的台词。"},{"role":"r2","emotion":"吐槽","text":"小满的台词。"},{"role":"r1","emotion":"开心","text":"重复的角色。"}]}', castActive);
+ok(castParsed.lines.length === 2 && castParsed.lines[0].roleId === 'r1' && castParsed.lines[1].emotion === 'tsukkomi', 'cast JSON parser + duplicate role dropped');
+const castFallback = parseCastScript('阿岚：开心！\n小满：这墙有点挤。', castActive);
+ok(castFallback.lines.length === 2 && castFallback.lines[0].name === '阿岚', 'cast fallback line parser');
+const castNames = parseCastScript('{"lines":[{"role":"阿岚","emotion":"温柔","text":"按名字匹配也可以。"}]}', castActive);
+ok(castNames.lines.length === 1 && castNames.lines[0].name === '阿岚' && castNames.lines[0].emotion === 'gentle', 'cast parser matches role name');
+const noSpeakers = chooseCastSpeakers(castActive.map((role) => ({ ...role, speakChance: 0 })), () => 0.9, false);
+ok(noSpeakers.length === 1, 'cast speaker probability always leaves one role');
+const allSpeakers = chooseCastSpeakers(castActive.map((role) => ({ ...role, speakChance: 100 })), () => 0.5, false);
+ok(allSpeakers.length === 2 && allSpeakers[0].id === 'r1' && allSpeakers[1].id === 'r2', 'cast speaker probability 100 picks all in order');
+const independent = chooseCastSpeakers(castActive, () => 0.5, false);
+ok(independent.length === 1 && independent[0].id === 'r1', 'each role rolls its own chance independently');
+ok(normalizeCast({ enabled: true, roles: [] }).roles.length === 3, 'normalizeCast always returns three slots');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

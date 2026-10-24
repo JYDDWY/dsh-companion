@@ -70,7 +70,7 @@ export function makeVoice({ getConfig, log }) {
   }
 
   /** 用 Windows SAPI 念一句（阻塞到念完；句与句之间串行）。返回真实成功/失败。 */
-  function sapiSpeak(text, { rate = 0, volume = 1 } = {}) {
+  function sapiSpeak(text, { rate = 0, volume = 1, onStart } = {}) {
     return new Promise((resolve) => {
       let settled = false;
       const finish = (result) => {
@@ -103,6 +103,8 @@ export function makeVoice({ getConfig, log }) {
             }
           });
           sapiChild = child;
+          // 字幕要对齐「真正开口」而不是调用返回；SAPI 在子进程启动时就算开始播放。
+          try { onStart?.(); } catch { /* 字幕失败不影响朗读 */ }
           child.on('error', (error) => {
             if (sapiChild === child) sapiChild = null;
             lastError = errorText(error);
@@ -119,7 +121,8 @@ export function makeVoice({ getConfig, log }) {
   /**
    * 说一句话。
    * @param {string} text 台词（已消毒）
-   * @param {{reason?: string}} meta 仅用于日志
+   * @param {{reason?: string, emotion?: string, voiceId?: string, pitch?: number, speed?: number, volume?: number, onStart?: Function}} meta
+   *        voiceId/pitch/speed/volume 可被多人角色覆盖；onStart 仅在 SAPI 真正开始播放时调用
    * @returns {Promise<{ok:boolean, skipped?:boolean, backend?:'service'|'sapi', id?:string, clipped?:boolean, error?:string}>}
    */
   async function speak(text, meta = {}) {
@@ -128,6 +131,10 @@ export function makeVoice({ getConfig, log }) {
     if (!config.voice.enabled || !clean) return { ok: true, skipped: true };
     const clipped = clean.length > config.voice.maxChars ? `${clean.slice(0, config.voice.maxChars)}…` : clean;
     const backend = config.voice.backend ?? 'auto';
+    const voiceId = String(meta.voiceId || config.voice.voiceId || '').trim().slice(0, 80) || config.voice.voiceId;
+    const pitch = Number.isFinite(Number(meta.pitch)) ? Number(meta.pitch) : config.voice.pitch;
+    const speed = Number.isFinite(Number(meta.speed)) ? Number(meta.speed) : config.voice.speed;
+    const volume = Number.isFinite(Number(meta.volume)) ? Number(meta.volume) : config.voice.volume;
 
     // 1) RVC 语音服务
     if (backend !== 'sapi' && serviceAvailable()) {
@@ -139,10 +146,10 @@ export function makeVoice({ getConfig, log }) {
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({
               text: clipped,
-              voiceId: config.voice.voiceId,
-              pitch: config.voice.pitch,
-              speed: config.voice.speed,
-              volume: config.voice.volume,
+              voiceId,
+              pitch,
+              speed,
+              volume,
               ...(config.voice.emotionEnabled && meta.emotion ? { emotion: meta.emotion } : {}),
             }),
           },
@@ -151,7 +158,7 @@ export function makeVoice({ getConfig, log }) {
         if (!result?.ok) throw new Error(result?.error?.message ?? result?.message ?? '语音服务拒绝了这次请求');
         lastBackend = 'service';
         lastError = null;
-        return { ok: true, id: result.id, clipped: clipped !== clean, backend: 'service', emotion: meta.emotion ?? null };
+        return { ok: true, id: result.id, clipped: clipped !== clean, backend: 'service', emotion: meta.emotion ?? null, voiceId };
       } catch (error) {
         markServiceDown(errorText(error));
         if (backend === 'service') {
@@ -163,8 +170,8 @@ export function makeVoice({ getConfig, log }) {
 
     // 2) Windows 系统语音（离线兜底）
     if (backend === 'auto' || backend === 'sapi') {
-      const rate = sapiRate(config.voice.speed);
-      const job = sapiChain.then(() => sapiSpeak(clipped, { rate, volume: config.voice.volume }));
+      const rate = sapiRate(speed);
+      const job = sapiChain.then(() => sapiSpeak(clipped, { rate, volume, onStart: meta.onStart }));
       sapiChain = job.catch(() => {});
       const sapiResult = await job;
       lastBackend = 'sapi';
@@ -172,7 +179,7 @@ export function makeVoice({ getConfig, log }) {
         return { ok: false, error: sapiResult?.error ?? '系统语音播放失败', backend: 'sapi', clipped: clipped !== clean };
       }
       lastError = null;
-      return { ok: true, clipped: clipped !== clean, backend: 'sapi', emotion: meta.emotion ?? null };
+      return { ok: true, clipped: clipped !== clean, backend: 'sapi', emotion: meta.emotion ?? null, voiceId };
     }
 
     return { ok: false, error: lastError ?? '没有可用的语音后端' };

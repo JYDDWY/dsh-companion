@@ -182,6 +182,27 @@ test('settings panel offers one explicit install action and a separate model ste
   assert.deepEqual(posts[0], { url: '/dsh-companion/voice-install/start', body: { confirmDownload: true } });
   assert.match(JSON.stringify(tree), /模型需自行下载/);
 });
+
+test('voice install panel recognizes an external running voice service', async () => {
+  const source = (await readFile(new URL('../client.js', import.meta.url), 'utf8'))
+    .replace('    function SettingsView(', '    window.__voicePanel = VoiceInstallPanel;\n    function SettingsView(');
+  const status = { supported: true, runtimeReady: false, models: { hubert: false, rmvpe: false, voices: [] }, job: null };
+  let registration;
+  const window = { __ModuleLoader__: { load(value) { registration = value; } } };
+  vm.runInNewContext(source, { window, fetch: async () => ({ ok: true, json: async () => ({}) }) });
+  const react = { createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState: initial => [initial === null ? status : initial, () => {}], useEffect() {},
+    useRef: value => ({ current: value }), useCallback: fn => fn };
+  registration.factory(() => react);
+  const tree = window.__voicePanel({
+    voiceData: { serviceOk: true, managed: false },
+    snapshot: { services: { voice: { ok: true } } },
+  });
+  const text = JSON.stringify(tree);
+  assert.match(text, /已检测到正在运行的本地语音服务/);
+  assert.match(text, /安装独立 CPU 语音环境（可选）/);
+});
+
 test('modelFiles scans every installed weight, not only hardcoded voices', async () => {
   const base = await mkdtemp(path.join(tmpdir(), 'dsc-voice-models-'));
   const models = path.join(base, 'voice', 'models');
@@ -276,6 +297,52 @@ test('settings view renders with a real config (catches undefined callback vars)
     onRefreshVoices: () => {}, onSaved: () => {}, notify: () => {},
   });
   assert.ok(tree); assert.equal(tree.type, 'div');
+});
+
+test('settings view renders cast editor and subtitle controls', async () => {
+  const { normalizeConfig } = await import('../src/host/config.mjs');
+  const config = normalizeConfig({
+    cast: { enabled: true, roles: [
+      { enabled: true, card: 'gentle', name: '阿岚', voiceId: 'v1', useAgentsMd: true },
+      { enabled: true, card: 'tsundere', name: '小满', voiceId: 'v2', useAgentsMd: false },
+      { enabled: false, card: 'analyst', name: '军师', voiceId: '', useAgentsMd: false },
+    ] },
+    subtitle: { enabled: true, color: '#eaf6ff', color2: '#4da3ff', delaySec: 2.5 },
+  });
+  const source = (await readFile(new URL('../client.js', import.meta.url), 'utf8'))
+    .replace('    function SettingsView(', '    window.__settingsView = SettingsView;' + String.fromCharCode(10) + '    function SettingsView(');
+  let registration;
+  const window = { __ModuleLoader__: { load(value) { registration = value; } } };
+  vm.runInNewContext(source, { window, fetch: async () => ({ ok: true, json: async () => ({}) }),
+    document: { visibilityState: 'visible' }, setInterval, clearInterval, setTimeout, clearTimeout });
+  const h = (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity) });
+  let hook = 0;
+  const react = {
+    createElement: h,
+    useState(initial) {
+      hook += 1;
+      if (hook === 1) return [JSON.parse(JSON.stringify(config)), () => {}];
+      return [initial, () => {}];
+    },
+    useEffect() {},
+    useRef(value) { return { current: value }; },
+    useCallback(fn) { return fn; },
+  };
+  registration.factory(() => react);
+  const tree = window.__settingsView({
+    snapshot: { config, services: { voice: { ok: true } } },
+    models: { providers: [] },
+    voices: [{ id: 'v1', name: '声线一' }, { id: 'v2', name: '声线二' }],
+    voiceState: { loading: false, error: '', data: { serviceOk: true, managed: false, voices: [] } },
+    onRefreshVoices: () => {}, onSaved: () => {}, notify: () => {},
+  });
+  const serialized = JSON.stringify(tree);
+  assert.match(serialized, /一人分饰多角/);
+  assert.match(serialized, /字幕延时（秒）/);
+  assert.match(serialized, /双色字幕/);
+  assert.match(serialized, /角色卡/);
+  assert.match(serialized, /这个角色沿用 AGENTS\.md/);
+  assert.match(serialized, /系统语音下所有角色会用同一个声音/);
 });
 
 test('installation endpoint accepts same-origin JSON and rejects cross-origin forms', async () => {

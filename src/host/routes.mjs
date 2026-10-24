@@ -265,6 +265,12 @@ export function makeRoutes({ ctx, engine, log, prefix, diag, voiceInstaller }) {
       }
 
       // ── 世界书 ─────────────────────────────────────────────────────
+      if (method === 'GET' && route === '/subtitle/fonts') {
+        const result = await engine.listSubtitleFonts({ force: url.searchParams.get('force') === '1' });
+        sendJson(res, 200, { ok: true, ...result });
+        return;
+      }
+
       if (method === 'POST' && route === '/subtitle/test') {
         const body = await readBody(req);
         try {

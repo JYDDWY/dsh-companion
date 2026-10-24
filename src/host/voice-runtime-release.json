@@ -1,7 +1,7 @@
 {
   "name": "@jyddwy/dsh-companion-rvc-runtime",
-  "version": "1.5.3-public1",
-  "url": "https://registry.npmmirror.com/@jyddwy/dsh-companion-rvc-runtime/-/dsh-companion-rvc-runtime-1.5.3-public1.tgz",
-  "sha512": "71bb6b5908bf69122692fa4cddd993c75de1cdcac9889d3802981dd550b668680e6d18cb9e35db36336390f4aec929c24222b0269b72562d24d871a3ff26fd8d",
+  "version": "1.5.3-public2",
+  "url": "https://registry.npmmirror.com/@jyddwy/dsh-companion-rvc-runtime/-/dsh-companion-rvc-runtime-1.5.3-public2.tgz",
+  "sha512": "21396cc2dc6b69ab82ae57496283a7a77ae824efb835c014fdf0cf80d6c357cb13aa505adcf2392aeb5de547060504f277bb1f5ad09c50cd89b4d6f107402ede",
   "maxBytes": 134217728
 }

@@ -10,10 +10,12 @@ import { makeCapture, pruneFrames, framesUsage, FRAMES_DIR } from './capture.mjs
 import { makeVoice } from './voice.mjs';
 import { makeSubtitle } from './subtitle.mjs';
 import { makeServices } from './services.mjs';
+import { activeCastRoles, chooseCastSpeakers, roleDisplayName, withRolePersona } from './cast.mjs';
 import { identifyScene, scenarioLabel, sceneIntervalSec, sceneMemoryWindowSec, classifyGenre, gameLabel } from './games.mjs';
 import {
   makePersonaLoader,
   buildSystemPrompt,
+  buildCastSystemPrompt,
   buildTalkPrompt,
   formatHistory,
   describeLastVision,
@@ -28,6 +30,7 @@ import {
   isGroundlessStillness,
   isNagging,
   mentionsHudFocus,
+  parseCastScript,
   parseVisionJson,
   sanitizeSpeech,
   sanitizeVisionText,
@@ -170,11 +173,111 @@ export function makeEngine({ ctx, deployConfig, log }) {
   let healthTimer = null;
   let serial = Promise.resolve();
 
+  // 字幕与语音对齐：语音服务 /speak 只负责入队，真正开口可能还要等 TTS/RVC 和前面的队列。
+  // 拿到 job id 后轮询 /status，等 current_play 变成这条任务再显示字幕；轮询失败则超时兜底。
+  const pendingSubtitleJobs = new Map();
+  const subtitleShowTimers = new Set();
+  let subtitlePoll = null;
+  let subtitlePolling = false;
+
   /** 串行执行：同一时间只跑一轮观察或一次聊天，避免抢模型/抢语音。 */
   function serialize(task) {
     const run = serial.then(task, task);
     serial = run.catch(() => {});
     return run;
+  }
+
+  // ── 字幕排程 ──────────────────────────────────────────────────────────────
+  // 字幕不能简单地在 voice.speak() 前显示：/speak 只是入队，TTS+RVC 出第一句还要时间；
+  // 多人台词还会排队。服务端能拿到 job id 时等 current_play 对上了再显示；拿不到
+  // （SAPI / 服务异常）就按用户设置的 delaySec 在开口时延迟显示。
+
+  function clearSubtitleScheduling() {
+    pendingSubtitleJobs.clear();
+    for (const timer of subtitleShowTimers) clearTimeout(timer);
+    subtitleShowTimers.clear();
+    if (subtitlePoll) {
+      clearInterval(subtitlePoll);
+      subtitlePoll = null;
+    }
+    subtitlePolling = false;
+  }
+
+  async function showSubtitleNow(text, meta) {
+    if (!text || !settings.subtitle?.enabled) return;
+    try {
+      await subtitle.show(text, { emotion: meta?.emotion ?? null });
+    } catch (error) {
+      log.warn(`字幕更新失败：${errorText(error)}`);
+    }
+  }
+
+  /** 按用户配置的额外延时显示字幕；immediate=true 用于没有语音可对齐的情况。 */
+  function scheduleSubtitleShow(text, meta, { immediate = false, skipDelay = false } = {}) {
+    if (!text || !settings.subtitle?.enabled) return;
+    const delaySec = immediate || meta?.silent || skipDelay || meta?.alignToVoice
+      ? 0
+      : Math.max(0, Math.min(10, Number(settings.subtitle.delaySec) || 0));
+    let timer = null;
+    const run = () => {
+      if (timer) subtitleShowTimers.delete(timer);
+      void showSubtitleNow(text, meta);
+    };
+    if (delaySec <= 0) {
+      run();
+      return;
+    }
+    timer = setTimeout(run, Math.round(delaySec * 1000));
+    timer.unref?.();
+    subtitleShowTimers.add(timer);
+  }
+
+  function ensureSubtitlePoller() {
+    if (subtitlePoll || disposed) return;
+    subtitlePoll = setInterval(async () => {
+      if (subtitlePolling) return;
+      if (!pendingSubtitleJobs.size) {
+        if (subtitlePoll) clearInterval(subtitlePoll);
+        subtitlePoll = null;
+        return;
+      }
+      subtitlePolling = true;
+      try {
+        let status = null;
+        try { status = await voice.status(); } catch { /* 服务状态读不到时走超时兜底 */ }
+        const playingId = status?.playing?.jobId ?? status?.currentJob?.id ?? null;
+        const recentIds = new Set(
+          (Array.isArray(status?.recent) ? status.recent : [])
+            .map((item) => item?.id)
+            .filter(Boolean),
+        );
+        const now = Date.now();
+        for (const [jobId, item] of pendingSubtitleJobs) {
+          if (jobId === playingId) {
+            pendingSubtitleJobs.delete(jobId);
+            scheduleSubtitleShow(item.text, item.meta, { skipDelay: true });
+          } else if (recentIds.has(jobId) || now > item.expiresAt) {
+            // 任务已经播完/超时：至少把字幕补上，别让它永远不出现。
+            pendingSubtitleJobs.delete(jobId);
+            scheduleSubtitleShow(item.text, item.meta, { skipDelay: true });
+          }
+        }
+      } finally {
+        subtitlePolling = false;
+      }
+      if (!pendingSubtitleJobs.size && subtitlePoll) {
+        clearInterval(subtitlePoll);
+        subtitlePoll = null;
+      }
+    }, 250);
+    subtitlePoll.unref?.();
+  }
+
+  function scheduleSubtitleForJob(jobId, text, meta) {
+    if (!jobId || !text || !settings.subtitle?.enabled) return;
+    const now = Date.now();
+    pendingSubtitleJobs.set(jobId, { text, meta, at: now, expiresAt: now + 45000 });
+    ensureSubtitlePoller();
   }
 
   // ── 截图缓存清理 ──────────────────────────────────────────────────────────
@@ -411,6 +514,7 @@ export function makeEngine({ ctx, deployConfig, log }) {
 
     // 字幕配置变化 → 重启悬浮窗（让字号/字体/开关立刻生效）
     if (JSON.stringify(before.subtitle) !== JSON.stringify(settings.subtitle)) {
+      clearSubtitleScheduling();
       void subtitle.applyConfig().catch((error) => log.warn(`字幕重启失败：${errorText(error)}`));
     }
 
@@ -724,6 +828,7 @@ export function makeEngine({ ctx, deployConfig, log }) {
       }
 
       // 5) 记录 + 语音
+      const castLines = Array.isArray(result.lines) && result.lines.length > 0 ? result.lines : null;
       const entry = {
         id: state.historyNextId++,
         role: 'assistant',
@@ -734,6 +839,8 @@ export function makeEngine({ ctx, deployConfig, log }) {
         sceneLabel: scenarioLabel(result.kind),
         genre: result.genre,
         emotion: result.emotion,
+        speaker: result.speakerName ?? null,
+        castLines,
         tickId,
         vision: result.vision ?? null,
         frameDir: lastFrameDir,
@@ -752,13 +859,24 @@ export function makeEngine({ ctx, deployConfig, log }) {
       state.lastTickAt = Date.now();
 
       state.phase = 'speaking';
-      const speakResult = await maybeSpeak(result.say, { reason: 'tick', emotion: result.emotion });
-      state.stats.spokenChars += speakResult.spoken ? result.say.length : 0;
+      const speakResult = castLines
+        ? await speakCastLines(castLines)
+        : await maybeSpeak(result.say, {
+            reason: 'tick',
+            emotion: result.emotion,
+            voiceId: result.voiceId,
+            speakerName: result.speakerName,
+            subtitleText: result.speakerName ? `${result.speakerName}：${result.say}` : result.say,
+          });
+      state.stats.spokenChars += castLines
+        ? speakResult.spokenChars
+        : (speakResult.spoken ? result.say.length : 0);
       state.phase = 'idle';
       log.info(`说了（${result.emotion}）：${truncate(result.say, 80)}${speakResult.spoken ? '' : '（未朗读）'}`);
       return {
         ok: true,
         say: result.say,
+        lines: result.lines ?? null,
         emotion: result.emotion,
         sinceLastSec,
         vision: result.vision,
@@ -879,9 +997,24 @@ export function makeEngine({ ctx, deployConfig, log }) {
         ? detection.memoryGenre
         : classifyGenre(`${vision.game ?? ''} ${vision.raw ?? ''} ${windowInfo?.title ?? ''}`);
     const windowSec = sceneMemoryWindowSec(settings, kind, genre);
-    const agentsText = settings.persona.useAgentsMd ? await persona.load(settings) : '';
+    const activeCast = activeCastRoles(settings);
+    const groupCast = activeCast.length >= 2;
+    // 每轮每个角色按自己的开口概率掷骰，再按设置决定是否打乱顺序；至少保底一个角色。
+    const selectedCast = groupCast
+      ? chooseCastSpeakers(activeCast, Math.random, settings.cast?.randomOrder !== false)
+      : activeCast;
+    const soloRole = activeCast.length === 1 ? activeCast[0] : null;
+    const promptSettings = soloRole ? withRolePersona(settings, soloRole) : settings;
+    const needsAgents = groupCast
+      ? activeCast.some((role) => role.useAgentsMd)
+      : soloRole
+        ? soloRole.useAgentsMd
+        : settings.persona.useAgentsMd;
+    const agentsText = needsAgents ? await persona.load(settings) : '';
     const label = detection?.label || gameLabel(windowInfo);
-    const system = buildSystemPrompt(settings, agentsText, { kind, label });
+    const system = groupCast
+      ? buildCastSystemPrompt(settings, agentsText, activeCast, { kind, label })
+      : buildSystemPrompt(promptSettings, agentsText, { kind, label });
     const worldbook = kind === 'game' ? await worldbookFor(label) : null;
     const worldbookText = worldbook ? worldbookPromptText(worldbook, settings.worldbook.maxPromptChars) : '';
     const historyText = formatHistory(state.history, Date.now(), windowSec);
@@ -895,12 +1028,13 @@ export function makeEngine({ ctx, deployConfig, log }) {
       activity,
       sinceLastSec,
       cheerMode: settings.talk.cheerMode,
-      config: settings,
+      config: promptSettings,
       historyText,
       summaryText: state.previousSummary || '',
       windowSec,
       genre,
       isReply: false,
+      cast: groupCast ? selectedCast : undefined,
     });
 
     // 第 2 步：出话（带情绪标签）
@@ -919,6 +1053,68 @@ export function makeEngine({ ctx, deployConfig, log }) {
     if (!talkResult.ok) {
       throw new Error(`出话模型失败（${targets.talk.provider}/${targets.talk.model}）：${talkResult.message}`);
     }
+
+    // 剧团模式：一次调用产出多角色剧本；解析失败时只重试一次格式，不做逐句重写。
+    if (groupCast) {
+      let parsed = parseCastScript(talkResult.text, selectedCast);
+      if (parsed.lines.length === 0) {
+        log.warn(`多人剧本解析失败，要求按 JSON 重写：${truncate(talkResult.text, 80)}`);
+        const retryPrompt = [
+          prompt,
+          '',
+          '【格式重写】你刚才的输出不是可解析的多人剧本。只输出一个 JSON 对象，不要 markdown、不要解释：',
+          '{"lines":[{"role":"r1","emotion":"开心","text":"..."}]}',
+          `本轮只让这些角色各说一条，共 ${selectedCast.length} 条；role 用 ${selectedCast.map((role) => role.id).join('/')}。`,
+        ].join(String.fromCharCode(10));
+        const retry = await streamText(ctx, {
+          provider: targets.talk.provider,
+          model: targets.talk.model,
+          content: [{ type: 'text', text: retryPrompt }],
+          system,
+          maxTokens: settings.talk.maxTokens,
+          temperature: settings.talk.temperature,
+          timeoutMs: settings.talk.timeoutMs,
+          reasoningEffort: talkEffort.effective,
+          signal,
+        });
+        addUsage(retry);
+        if (retry.ok) parsed = parseCastScript(retry.text, selectedCast);
+      }
+      const roleById = new Map(selectedCast.map((role) => [role.id, role]));
+      const lines = parsed.lines
+        .map((line) => {
+          let text = String(line.text ?? '').trim();
+          if (settings.talk.banQuestions) text = text.replace(/[?？]+/g, '。');
+          return {
+            ...line,
+            text,
+            voiceId: roleById.get(line.roleId)?.voiceId || '',
+          };
+        })
+        .filter((line) => line.text && !(settings.talk.banFiller && isGenericFiller(line.text)));
+      if (lines.length === 0) {
+        throw new Error(`多人剧本没有解析出可用台词（${parsed.error ?? '格式不符'}）`);
+      }
+      if (lines.length < selectedCast.length) {
+        log.warn(`多人剧本只解析出 ${lines.length}/${selectedCast.length} 个角色，按现有台词开口`);
+      }
+      const say = lines.map((line) => `${line.name}：${line.text}`).join(String.fromCharCode(10));
+      return {
+        say,
+        lines,
+        emotion: lines[0].emotion,
+        vision,
+        genre,
+        kind,
+        targets,
+        reasoning: { vision: visionEffort, talk: talkEffort },
+        llmCalls: usage.calls,
+        tokensIn: usage.tokensIn,
+        tokensOut: usage.tokensOut,
+        cast: true,
+      };
+    }
+
     let { text: rawText, emotion } = splitEmotion(talkResult.text);
     let say = sanitizeSpeech(rawText);
     let extraCalls = 0;
@@ -1079,6 +1275,8 @@ export function makeEngine({ ctx, deployConfig, log }) {
       genre,
       kind,
       targets,
+      speakerName: soloRole ? roleDisplayName(soloRole) : null,
+      voiceId: soloRole?.voiceId || '',
       reasoning: { vision: visionEffort, talk: talkEffort },
       llmCalls: usage.calls,
       tokensIn: usage.tokensIn,
@@ -1104,11 +1302,16 @@ export function makeEngine({ ctx, deployConfig, log }) {
         const targets = await resolveTargets(ctx, settings);
         if (!targets.talk) throw new Error('没有可用的对话模型（面板里指定一个，或先在 DSH 里选好模型）');
         state.modelReport = targets.report;
-        const agentsText = settings.persona.useAgentsMd ? await persona.load(settings) : '';
+        const castRoles = activeCastRoles(settings);
+        const mainRole = castRoles[0] ?? null;
+        const promptSettings = mainRole ? withRolePersona(settings, mainRole) : settings;
+        const agentsText = (mainRole ? mainRole.useAgentsMd : settings.persona.useAgentsMd)
+          ? await persona.load(settings)
+          : '';
         const kind = state.sceneKind ?? 'other';
         const scene = state.scene;
         const label = scene?.label || '';
-        const system = buildSystemPrompt(settings, agentsText, { kind, label });
+        const system = buildSystemPrompt(promptSettings, agentsText, { kind, label });
         const genre = scene?.genre ?? 'unknown';
         const talkEffort = await resolveEffort(targets.talk.provider, targets.talk.model, settings.talk.reasoningEffort);
         // 聊天回复允许回顾更久：用户在主动提问，不是即兴吐槽
@@ -1129,7 +1332,7 @@ export function makeEngine({ ctx, deployConfig, log }) {
           activity: state.lastActivity ?? null,
           sinceLastSec,
           cheerMode: settings.talk.cheerMode,
-          config: settings,
+          config: promptSettings,
           historyText,
           summaryText: state.previousSummary || '',
           windowSec,
@@ -1204,6 +1407,8 @@ export function makeEngine({ ctx, deployConfig, log }) {
           sceneLabel: scenarioLabel(kind),
           genre,
           emotion,
+          speaker: mainRole?.name ?? null,
+          roleId: mainRole?.id ?? null,
           source: 'chat',
           replyTo: 'user',
         };
@@ -1215,11 +1420,18 @@ export function makeEngine({ ctx, deployConfig, log }) {
 
         state.phase = 'speaking';
         // R09：聊天朗读开关只控制音频；字幕仍按 setsubtitle 设置独立显示
-        const speakResult = await maybeSpeak(say, { reason: 'chat', emotion, silent: settings.voice.speakReplies === false });
+        const speakResult = await maybeSpeak(say, {
+          reason: 'chat',
+          emotion,
+          silent: settings.voice.speakReplies === false,
+          voiceId: mainRole?.voiceId || undefined,
+          speakerName: mainRole?.name || undefined,
+          subtitleText: mainRole ? `${mainRole.name}：${say}` : say,
+        });
         state.stats.spokenChars += speakResult.spoken ? say.length : 0;
         state.phase = 'idle';
         log.info(`回复主人（${emotion}）：${truncate(say, 80)}`);
-        return { ok: true, say, emotion, spoken: speakResult.spoken, reply };
+        return { ok: true, say, emotion, spoken: speakResult.spoken, speaker: mainRole?.name ?? null, reply };
       } catch (error) {
         state.lastError = { at: Date.now(), message: errorText(error).slice(0, 600) };
         state.phase = 'idle';
@@ -1229,28 +1441,72 @@ export function makeEngine({ ctx, deployConfig, log }) {
     });
   }
 
-  /** 去重 + 朗读（把情绪一起交给语音服务）。 */
+  /** 去重 + 朗读（把情绪/角色声线一起交给语音服务），并负责把字幕排到真正开口时。 */
   async function maybeSpeak(text, meta) {
-    if (settings.subtitle?.enabled) {
-      void subtitle.show(text, { emotion: meta?.emotion }).catch((error) => log.warn(`字幕更新失败：${errorText(error)}`));
+    const subtitleText = String(meta?.subtitleText ?? text ?? '');
+    const voiceOn = settings.voice.enabled && !meta?.silent;
+    if (!voiceOn) {
+      scheduleSubtitleShow(subtitleText, meta, { immediate: true });
+      return { spoken: false, muted: Boolean(meta?.silent), voiceDisabled: !settings.voice.enabled };
     }
-    if (meta?.silent) return { spoken: false, muted: true };
-    if (!settings.voice.enabled) return { spoken: false };
     const now = Date.now();
     if (settings.voice.dedupeWindowSec > 0 && state.lastSpeak.text === text && now - state.lastSpeak.at < settings.voice.dedupeWindowSec * 1000) {
       log.info('同一句话刚说过，跳过朗读');
+      scheduleSubtitleShow(subtitleText, meta, { immediate: true });
       return { spoken: false };
     }
     state.lastSpeak = { text, at: now };
-    const result = await voice.speak(text, meta ?? {});
+    // delaySec > 0 且不是多人逐句自动对齐时，按「台词生成后固定等待」处理；
+    // 这是用户手动校准合成延迟的路径。0 = 自动等语音真正开口。
+    const fixedDelay = Number(settings.subtitle?.delaySec) > 0 && meta?.alignToVoice !== true;
+    if (fixedDelay) scheduleSubtitleShow(subtitleText, meta);
+    let started = false;
+    const onStart = () => {
+      if (started || fixedDelay) return;
+      started = true;
+      scheduleSubtitleShow(subtitleText, meta);
+    };
+    const result = await voice.speak(text, { ...(meta ?? {}), onStart });
+    if (!fixedDelay) {
+      if (result.backend === 'service' && result.id) {
+        scheduleSubtitleForJob(result.id, subtitleText, meta);
+      } else if (!started) {
+        // SAPI 失败/服务没有 job id 时至少把字幕补上；有 onStart 的 SAPI 已经排过了。
+        scheduleSubtitleShow(subtitleText, meta);
+      }
+    }
     state.lastVoice = {
       at: Date.now(),
       backend: result.backend ?? null,
       emotion: meta?.emotion ?? result.emotion ?? null,
       clipped: Boolean(result.clipped),
     };
-    if (result.ok && !result.skipped) return { spoken: true, id: result.id, backend: result.backend };
+    if (result.ok && !result.skipped) return { spoken: true, id: result.id, backend: result.backend, voiceId: result.voiceId };
     return { spoken: false, error: result.error };
+  }
+
+  /** 多人同轮：逐句入队（不等待播放），每条用自己的角色声线和字幕前缀。 */
+  async function speakCastLines(lines) {
+    let spoken = false;
+    let spokenChars = 0;
+    const errors = [];
+    for (const line of Array.isArray(lines) ? lines : []) {
+      const result = await maybeSpeak(line.text, {
+        reason: 'tick',
+        emotion: line.emotion,
+        voiceId: line.voiceId,
+        speakerName: line.name,
+        subtitleText: `${line.name}：${line.text}`,
+        alignToVoice: true,
+      });
+      if (result.spoken) {
+        spoken = true;
+        spokenChars += String(line.text ?? '').length;
+      } else if (result.error) {
+        errors.push(result.error);
+      }
+    }
+    return { spoken, spokenChars, errors };
   }
 
   /**
@@ -1324,9 +1580,15 @@ export function makeEngine({ ctx, deployConfig, log }) {
   }
 
   async function stopSpeaking() {
+    clearSubtitleScheduling();
     await voice.stop();
+    await subtitle.clear().catch(() => {});
     state.phase = settings.enabled ? 'idle' : 'paused';
     return { ok: true };
+  }
+
+  async function listSubtitleFonts(options = {}) {
+    return subtitle.listFonts(options);
   }
 
   async function captureNow() {
@@ -1422,6 +1684,7 @@ export function makeEngine({ ctx, deployConfig, log }) {
     cancelCurrentTick('disposed', { force: true });
     try { researchController.abort(new Error('disposed')); } catch { /* ignore */ }
     stopTimer();
+    clearSubtitleScheduling();
     if (healthTimer) clearInterval(healthTimer);
     healthTimer = null;
     await historyWriter.flushNow().catch(() => {});
@@ -1451,6 +1714,7 @@ export function makeEngine({ ctx, deployConfig, log }) {
     cleanupFrames,
     testSubtitle,
     restartSubtitle,
+    listSubtitleFonts,
     dispose,
     VOICE: voice,
     CAPTURE: capture,

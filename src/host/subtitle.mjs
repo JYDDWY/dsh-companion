@@ -15,15 +15,34 @@ import { errorText } from './util.mjs';
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const PS_SCRIPT = path.join(PACKAGE_ROOT, 'win', 'subtitle.ps1');
+const FONT_SCRIPT = path.join(PACKAGE_ROOT, 'win', 'list-fonts.ps1');
 const DIR = path.join(dataDir(), 'subtitle');
 const STATE_FILE = path.join(DIR, 'state.json');
 const POSITION_FILE = path.join(DIR, 'position.json');
+
+/** 字体枚举失败时的兜底：不保证每台机器都有，但比空下拉框强。 */
+const FALLBACK_FONTS = [
+  'Microsoft YaHei',
+  'Microsoft YaHei UI',
+  'DengXian',
+  'SimHei',
+  'SimSun',
+  'KaiTi',
+  'FangSong',
+  'Noto Sans SC',
+  'Noto Serif SC',
+  'Source Han Sans SC',
+  'Consolas',
+  'Segoe UI',
+  'Arial',
+];
 
 export function makeSubtitle({ getConfig, log }) {
   let child = null;
   let lastError = null;
   let lastShowAt = 0;
   let starting = false;
+  let fontCache = { at: 0, value: null, error: null };
 
   function config() {
     return getConfig()?.subtitle ?? {};
@@ -100,7 +119,9 @@ export function makeSubtitle({ getConfig, log }) {
         ttlSec: Number(cfg.displaySec) > 0 ? Number(cfg.displaySec) : 8,
         fontSize: Number(cfg.fontSize) > 0 ? Number(cfg.fontSize) : 28,
         fontFamily: String(cfg.fontFamily || 'Microsoft YaHei'),
-        color: String(cfg.color || '#ffffff'),
+        color: String(cfg.color || '#eaf6ff'),
+        color2: String(cfg.color2 || cfg.color || '#4da3ff'),
+        clickThrough: cfg.clickThrough !== false,
         bgOpacity: Number.isFinite(Number(cfg.bgOpacity)) ? Number(cfg.bgOpacity) : 0.45,
         opacity: Number.isFinite(Number(cfg.opacity)) ? Number(cfg.opacity) : 0.95,
         emotion: meta?.emotion ?? null,
@@ -137,6 +158,49 @@ export function makeSubtitle({ getConfig, log }) {
     }
   }
 
+  /**
+   * 枚举本机字体给设置面板用。不进字幕窗口、不写文件；失败时返回兜底列表。
+   * 字体列表变化很少，缓存 10 分钟；面板的「刷新字体」会 force 一次。
+   */
+  async function listFonts({ force = false } = {}) {
+    if (!force && fontCache.value && Date.now() - fontCache.at < 10 * 60_000) {
+      return { ok: true, fonts: fontCache.value, fallback: false, error: null, cached: true };
+    }
+    const result = await new Promise((resolve) => {
+      execFile(
+        'powershell.exe',
+        ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', FONT_SCRIPT],
+        { windowsHide: true, timeout: 15000, encoding: 'utf8' },
+        (error, stdout, stderr) => {
+          if (error) {
+            resolve({ ok: false, fonts: [], error: errorText(error).slice(0, 300), stderr: String(stderr ?? '').slice(0, 300) });
+            return;
+          }
+          const fonts = String(stdout ?? '')
+            .replace(/^\uFEFF/, '')
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter((line) => line && line.length <= 100)
+            .filter((line, index, all) => all.indexOf(line) === index);
+          resolve({ ok: fonts.length > 0, fonts, error: fonts.length > 0 ? null : '系统没有返回可用字体' });
+        },
+      );
+    });
+    if (result.ok) {
+      fontCache = { at: Date.now(), value: result.fonts, error: null };
+      return { ok: true, fonts: result.fonts, fallback: false, error: null, cached: false };
+    }
+    fontCache = { at: 0, value: null, error: result.error };
+    log?.warn?.(`字体枚举失败：${result.error}`);
+    return {
+      ok: true,
+      fonts: FALLBACK_FONTS,
+      fallback: true,
+      error: result.error,
+      cached: false,
+    };
+  }
+
   /** 配置变化时调用：关了就停，开了就重启（让新窗口读新样式）。 */
   async function applyConfig() {
     stop();
@@ -158,5 +222,5 @@ export function makeSubtitle({ getConfig, log }) {
     };
   }
 
-  return { ensureRunning, show, clear, stop, applyConfig, status, STATE_FILE, POSITION_FILE };
+  return { ensureRunning, show, clear, stop, applyConfig, status, listFonts, STATE_FILE, POSITION_FILE };
 }
